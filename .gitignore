@@ -1,0 +1,25 @@
+# ASPECT OS build artefacts
+build/
+*.efi
+*.elf
+*.o
+*.iso
+*.img
+*.bin
+
+# QEMU runtime
+qemu-test/*.ppm
+*.fd
+*.pid
+*.sock
+
+# Rust
+target/
+Cargo.lock
+
+# Design reference dataset (nur Farben/Motive, kein OS-Code)
+reference/
+
+# OS junk
+Thumbs.db
+.DS_Store
