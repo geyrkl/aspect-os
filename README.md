@@ -75,7 +75,7 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1"
 
 - [x] **M1** Boot + gradient desktop with wordmark, menubar, dock (Rust)
 - [x] **M2** Own GDT/IDT, exception handlers, PIT timer -> clock in the menubar
-- [ ] **M3** Own drivers: PS/2 mouse + keyboard, own physical allocator
+- [x] **M3** Own drivers: PS/2 mouse + keyboard, own physical allocator
 - [ ] **M4** Window compositor: move, close, blur effects
 - [ ] **M5** Own bitmap font (ASCII), clock/menu text, wordmark polish
 - [ ] **M6** Boot on real hardware (USB stick)
