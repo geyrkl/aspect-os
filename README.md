@@ -13,25 +13,29 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 │   └── main.rs               # UEFI bootloader (own UEFI headers, handover)
 ├── kernel/
 │   ├── main.rs               # kernel entry (kmain, .bss zeroing, event loop)
-│   ├── gui.rs                # framebuffer GUI: gradient, menubar, dock, clock
-│   ├── font.rs               # bitmap digits (4x7) for the menubar clock
+│   ├── gui.rs                # GUI: draw targets, clipping, themes, text, dock, cursor
+│   ├── wm.rs                 # window manager + compositor (drag, focus, queues)
+│   ├── apps.rs               # bundled apps: files, terminal, calc, paint, settings, browser
+│   ├── font.rs               # 4x7 clock digits + 5x7 ASCII font (95 glyphs)
 │   ├── gdt.rs                # own GDT (ring-0 code/data) + CS/SS reload
 │   ├── idt.rs                # own IDT, exception stubs, IRQ0/1/12 dispatcher
 │   ├── pic.rs                # 8259A PIC remap (vectors 32..47)
 │   ├── pit.rs                # PIT channel 0 as system tick (1000 Hz)
 │   ├── ps2.rs                # 8042 controller init (keyboard + mouse)
-│   ├── keyboard.rs           # scancode set 2 -> key events
+│   ├── keyboard.rs           # scancode set 2 -> key codes (shift map, debounce)
 │   ├── mouse.rs              # 3-byte packets -> cursor deltas + buttons
 │   ├── pmm.rs                # bitmap physical memory allocator (4 KiB frames)
 │   ├── io.rs                 # port I/O (outb/inb)
 │   ├── logo.rs               # "ASPECT OS" wordmark as vector strokes
 │   ├── serial.rs             # COM1 debug output
 │   ├── bootinfo.rs           # shared structure bootloader -> kernel
-│   └── kernel.ld             # linker script (kernel @ 0x100000, .text.first)
+│   └── kernel.ld             # linker script (kernel @ 0x2000000, .text.first)
 ├── scripts/
 │   ├── build.sh              # WSL build entry point (toolchain check + make)
 │   ├── build-iso.sh          # FAT ESP (mtools) + UEFI El-Torito ISO (xorriso)
 │   ├── run-qemu.sh           # QEMU/OVMF test, screendumps via QMP
+│   ├── run-m4.sh             # M4 acceptance run: apps, drag, keys, themes, browser
+│   ├── debug-m4.sh           # short M4 debug run (strokes, drag, keys)
 │   ├── run-test.sh           # Windows wrapper for run-qemu.sh
 │   ├── start-os.sh/.ps1      # boot the OS live in a QEMU window
 │   └── wsl-setup.sh          # toolchain install (Rust, mtools, OVMF, ...)
@@ -45,11 +49,13 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 
 | Component | Description |
 |---|---|
-| **Bootloader** `boot/main.rs` | Own `repr(C)` UEFI headers (no GNU-EFI), GOP video mode (highest resolution), kernel **embedded** (`include_bytes!`) and copied to `0x100000`, own stack, memory map copied into `BootInfo` before `ExitBootServices` (with retry), handover via `asm!` (`rdi` = BootInfo) |
-| **Kernel** `kernel/` | `.bss` zeroing via linker symbols, staged logging via COM1, event loop (`sti`/`hlt`) |
-| **GUI** `kernel/gui.rs` | 4-color bilinear gradient (LiquidGlass palette), alpha blending, rounded rects (scanline + `isqrt`), Bresenham lines with brush, SDF strokes, menubar (monogram/wifi/battery/clock), dock with 6 icons, mouse cursor with background save/restore |
-| **Interrupts (M2)** | `gdt.rs` own GDT with far-return CS reload, `idt.rs` 32 exception stubs (global_asm, own register save) + IRQ0/1/12 dispatcher, `pic.rs` 8259A remap to 32..47, `pit.rs` timer @ 1000 Hz, clock in the menubar via own 4x7 bitmap digits |
-| **Input + memory (M3)** | `ps2.rs` 8042 init (translation off, scancode set 2, timeouts), `keyboard.rs` keymap, `mouse.rs` packet parser, `pmm.rs` bitmap frame allocator fed by the UEFI memory map from the bootloader |
+| **Bootloader** `boot/main.rs` | Own `repr(C)` UEFI headers (no GNU-EFI), GOP video mode (highest resolution), kernel **embedded** (`include_bytes!`) and copied to `0x2000000` (32 MiB span reserved: the image includes ~19 MiB of `.bss` buffers, and OVMF reserves everything below ~24 MiB), own stack, memory map copied into `BootInfo` before `ExitBootServices` (with retry), handover via `asm!` (`rdi` = BootInfo) |
+| **Kernel** `kernel/` | `.bss` zeroing (u64 bulk + byte head/tail), staged logging via COM1, event loop (`sti`/`hlt`): drains mouse/key queues, repaints on demand, ticks the menubar clock once per second |
+| **GUI** `kernel/gui.rs` | Draw targets (framebuffer / 2048x2048 background buffer / app canvas) with clipping, 4 themes (AURORA/SUNSET/OCEAN/FOREST) with bilinear gradients, alpha blending, rounded rects (scanline + `isqrt`), Bresenham brush lines, SDF strokes, menubar (monogram/wifi/battery/clock), dock with 6 app icons, 5x7 ASCII bitmap font (`font.rs`), pre-rendered background blitted in u64 bulk, arrow cursor drawn last (no save/restore) |
+| **Interrupts (M2)** | `gdt.rs` own GDT with far-return CS reload, `idt.rs` 32 exception stubs (global_asm, own register save) + IRQ0/1/12 dispatcher (IRQ1/12 push events into the WM queues), `pic.rs` 8259A remap to 32..47, `pit.rs` timer @ 1000 Hz |
+| **Input + memory (M3)** | `ps2.rs` 8042 init (translation off, scancode set 2, timeouts), `keyboard.rs` keymap + shift map + 20 ms make-code debounce, `mouse.rs` 3-byte packet parser (`Option` events only on completed packets), `pmm.rs` bitmap frame allocator fed by the UEFI memory map from the bootloader |
+| **Window manager (M4)** `wm.rs` | Window list with z-order by index (max 8), ring-buffer input queues (IRQ producer / main-loop consumer), raise on click, title-bar drag, red traffic light closes, dock launches apps, content clicks/moves/keys routed to the focused app, compositor pass: background -> windows (shadow, chrome, clipped content) -> cursor |
+| **Apps (M4)** `apps.rs` | Files (static VFS: 3 folders x 3 text files, tabs + detail pane), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About (via the menubar monogram) |
 | **Build** | `rustc --target x86_64-unknown-uefi` -> `BOOTX64.EFI` (rust-lld); `rustc --target x86_64-unknown-none` -> ELF -> `objcopy` -> flat binary; ISO via mtools + xorriso |
 
 ## Build & Test (WSL Ubuntu-24.04)
@@ -76,9 +82,9 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1"
 - [x] **M1** Boot + gradient desktop with wordmark, menubar, dock (Rust)
 - [x] **M2** Own GDT/IDT, exception handlers, PIT timer -> clock in the menubar
 - [x] **M3** Own drivers: PS/2 mouse + keyboard, own physical allocator
-- [ ] **M4** Window compositor: move, close, blur effects
-- [ ] **M5** Own bitmap font (ASCII), clock/menu text, wordmark polish
-- [ ] **M6** Boot on real hardware (USB stick)
+- [x] **M4** Window compositor + apps: drag/focus/close, file manager, terminal, calculator, paint, settings (themes), offline browser, about
+- [ ] **M5** Real file system (ATA/AHCI + own FS format)
+- [ ] **M6** Network stack, then real hardware (USB stick)
 
 ## License
 

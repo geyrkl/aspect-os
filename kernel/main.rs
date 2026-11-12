@@ -1,6 +1,7 @@
 // ASPECT OS - kernel in Rust: module structure
 #![no_std]
 #![no_main]
+#![allow(unknown_lints, static_mut_refs)]
 use core::arch::asm;
 use core::panic::PanicInfo;
 
@@ -11,6 +12,7 @@ fn panic(_i: &PanicInfo) -> ! {
     }
 }
 
+pub mod apps;
 pub mod bootinfo;
 pub mod font;
 pub mod gdt;
@@ -25,10 +27,13 @@ pub mod pit;
 pub mod pmm;
 pub mod ps2;
 pub mod serial;
+pub mod wm;
 
+use apps::AppId;
 use bootinfo::BootInfo;
 
-// zero .bss (bootloader hands over raw, uninitialized memory)
+// zero .bss (bootloader hands over raw, uninitialized memory);
+// u64 bulk writes, byte-wise head/tail for alignment
 unsafe fn zero_bss() {
     extern "C" {
         static __bss_start: u8;
@@ -37,9 +42,19 @@ unsafe fn zero_bss() {
     let start = &__bss_start as *const u8 as usize;
     let end = &__bss_end as *const u8 as usize;
     let mut p = start;
-    while p < end {
+    while p < end && (p & 7) != 0 {
         (p as *mut u8).write_volatile(0);
         p += 1;
+    }
+    let mut q = p as *mut u64;
+    while (q as usize) + 8 <= end {
+        q.write_volatile(0);
+        q = q.add(1);
+    }
+    let mut r = q as *mut u8;
+    while (r as usize) < end {
+        r.write_volatile(0);
+        r = r.add(1);
     }
 }
 
@@ -58,16 +73,20 @@ fn kernel_main(bi: *const BootInfo) {
     static LAST_SEC: AtomicU64 = AtomicU64::new(0);
 
     serial::log("ASPECT OS kernel running (Rust)\n");
+
+    // --- M4: compositor boot-up ---
     gui::fb_init(&unsafe { *bi });
-    gui::draw_gradient();
-    serial::log("gradient ok\n");
-    gui::draw_menubar();
-    serial::log("menubar ok\n");
-    logo::draw_wordmark(gui::width() / 2, gui::height() * 40 / 100, 5);
-    serial::log("wordmark ok\n");
-    gui::draw_dock();
-    serial::log("dock ok\n");
-    serial::log("desktop drawn\n");
+    wm::init();
+    apps::init();
+    gui::bg_init();
+    serial::log("desktop background ok\n");
+
+    // initial windows: file manager, terminal, calculator
+    wm::open(AppId::Files);
+    wm::open(AppId::Terminal);
+    wm::open(AppId::Calc);
+    wm::redraw();
+    serial::log("first frame drawn\n");
 
     // --- M2: interrupts ---
     serial::log("M2: setting up GDT\n");
@@ -97,28 +116,20 @@ fn kernel_main(bi: *const BootInfo) {
             pages: bi_ref.mem[i].pages,
         };
     }
-    unsafe { pmm::init(&regs[..n], 0x100000, bi_ref.kernel_size) };
-    serial::log("pmm ready, alloc demo:\n");
-    let f1 = pmm::alloc();
-    let f2 = pmm::alloc();
-    serial::log("frame1 = ");
-    serial::log_hex(f1);
-    serial::log("  frame2 = ");
-    serial::log_hex(f2);
-    serial::log("\n");
-    pmm::free(f1);
-    let f3 = pmm::alloc();
-    serial::log("frame3 (after free) = ");
-    serial::log_hex(f3);
-    serial::log("\n");
+    unsafe { pmm::init(&regs[..n], 0x2000000, bi_ref.kernel_size) };
+    serial::log("pmm ready\n");
 
     gui::init_cursor();
-    serial::log("cursor initialized\n");
-    serial::log("interrupts enabled\n");
+    serial::log("M4: compositor running, interrupts enabled\n");
 
-    // event loop: update the menubar clock every second
+    // event loop: drain input queues, redraw on change, clock every second
     loop {
         unsafe { asm!("sti", options(nomem, nostack)) };
+        wm::on_mouse();
+        wm::on_key();
+        if wm::take_dirty() {
+            wm::redraw();
+        }
         let sec = pit::ticks() / 1000;
         if LAST_SEC.swap(sec, Ordering::Relaxed) != sec {
             gui::draw_clock(sec);

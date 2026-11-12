@@ -5,20 +5,22 @@ static mut PKT: [u8; 3] = [0; 3];
 static mut IDX: u8 = 0;
 static mut BTN: u8 = 0;
 
-/// called from the IRQ12 stub with the data byte; returns the translated event
-pub unsafe fn handle(b: u8) -> (i32, i32, u8, bool) {
+/// called from the IRQ12 stub with the data byte. Returns Some(event) only
+/// when a full packet is decoded - lead bytes and stray bytes return None
+/// so the queue never sees empty filler events between real packets.
+pub unsafe fn handle(b: u8) -> Option<(i32, i32, u8, bool)> {
     let idx = IDX;
 
     // byte 0: sync bit 3 must be set and bits 6/7 must be clear
     // (real packet starts are 0x08..0x2F; stray bytes like 0xFA are discarded)
     if idx == 0 && (b & 0xC8) != 0x08 {
-        return (0, 0, 0, false);
+        return None;
     }
 
     PKT[idx as usize] = b;
     IDX = idx + 1;
     if IDX < 3 {
-        return (0, 0, 0, false);
+        return None;
     }
     IDX = 0;
 
@@ -41,5 +43,5 @@ pub unsafe fn handle(b: u8) -> (i32, i32, u8, bool) {
     BTN = buttons;
     let click = (buttons & 1) != 0 && (prev & 1) == 0;
 
-    (dx, dy, buttons, click)
+    Some((dx, dy, buttons, click))
 }

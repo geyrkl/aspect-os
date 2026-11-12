@@ -344,20 +344,27 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
         con_print(&ctx, "video mode set\r\n");
         serial_log("video mode set\n");
 
-        // --- kernel: embedded directly, copy to 0x100000 ---
+        // --- kernel: embedded directly, copy to 0x2000000 (32 MiB) ---
+        // 8192 pages (32 MiB): the kernel image span includes ~19 MiB of .bss
+        // (desktop background buffer + paint canvas), so the physical memory
+        // allocator must reserve the whole range, not just the file size.
+        // 32 MiB keeps clear of the firmware's reserved low memory (the
+        // conventional region starts at ~0x1780000 under OVMF).
         let ksize = KERNEL.len() as u64;
-        let mut kbase: u64 = 0x100000;
-        let kpages = ((ksize + 0xFFFFF) >> 20).max(4);
+        const K_BASE: u64 = 0x2000000;
+        const K_PAGES: u64 = 8192;
+        let mut kbase: u64 = K_BASE;
+        let kpages = K_PAGES.max((ksize + 0xFFFFF) >> 20); // never below the binary size
         if ((*bs).allocate_pages)(ALLOCATE_ADDRESS, EFI_LOADER_DATA, kpages, &mut kbase)
             != EFI_SUCCESS
         {
-            fatal(&ctx, "AllocatePages 0x100000 failed");
+            fatal(&ctx, "AllocatePages 0x2000000 failed");
         }
         let dst = kbase as *mut u8;
         for (i, b) in KERNEL.iter().enumerate() {
             dst.add(i).write_volatile(*b);
         }
-        serial_log("kernel at 0x100000\n");
+        serial_log("kernel at 0x2000000\n");
 
         // --- BootInfo ---
         let mut bi_ptr: *mut u8 = core::ptr::null_mut();
@@ -380,7 +387,9 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
         (*bi).fb_height = (*(*(*gop).mode).info).v_res;
         (*bi).fb_pitch_px = (*(*(*gop).mode).info).scanline_px;
         (*bi).fb_bpp = 32;
-        (*bi).kernel_size = ksize;
+        // kernel_size = reserved image span (32 MiB) so the kernel PMM
+        // reserves the whole region including the .bss buffers
+        (*bi).kernel_size = kpages * 4096;
 
         // --- own stack ---
         let mut stack_mem: *mut u8 = core::ptr::null_mut();

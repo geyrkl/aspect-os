@@ -202,25 +202,15 @@ extern "C" fn k_irq_handler(n: u64) {
         pit::tick();
         pic::send_eoi(0);
     } else if n == 1 {
-        let ev = unsafe { crate::keyboard::handle() };
-        match ev {
-            crate::keyboard::KeyEvent::Char(c) => {
-                serial::log("key: ");
-                let one = [c];
-                serial::log(core::str::from_utf8(&one).unwrap_or("?"));
-                serial::log("\n");
-            }
-            crate::keyboard::KeyEvent::Enter => serial::log("key: Enter\n"),
-            crate::keyboard::KeyEvent::Backspace => serial::log("key: Backspace\n"),
-            crate::keyboard::KeyEvent::Escape => serial::log("key: Escape\n"),
-            crate::keyboard::KeyEvent::Ignore => {}
+        let code = unsafe { crate::keyboard::handle() };
+        if code != 0 {
+            crate::wm::push_key(code);
         }
         pic::send_eoi(1);
     } else if n == 12 {
         let raw = crate::io::inb(0x60);
-        let (dx, dy, btn, click) = unsafe { crate::mouse::handle(raw) };
-        if dx != 0 || dy != 0 || click {
-            crate::gui::move_cursor(dx, dy, btn, click);
+        if let Some((dx, dy, btn, click)) = unsafe { crate::mouse::handle(raw) } {
+            crate::wm::push_mouse(dx, dy, btn, click);
         }
         pic::send_eoi(12);
     } else {

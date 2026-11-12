@@ -8,7 +8,8 @@
 BUILDDIR := build
 RUSTC    := /root/.cargo/bin/rustc
 
-KERNEL_SRCS := kernel/main.rs kernel/gui.rs kernel/logo.rs \
+KERNEL_SRCS := kernel/main.rs kernel/gui.rs kernel/logo.rs kernel/wm.rs \
+               kernel/apps.rs \
                kernel/serial.rs kernel/bootinfo.rs kernel/font.rs \
                kernel/gdt.rs kernel/idt.rs kernel/io.rs \
                kernel/pic.rs kernel/pit.rs \

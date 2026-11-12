@@ -1,12 +1,35 @@
-// ASPECT OS - own GUI library in Rust: draws directly to the framebuffer
-// Gradient, menubar, dock, clock, cursor - all our own code.
+// ASPECT OS - own GUI library in Rust: draw targets (framebuffer / background
+// buffer), clipping, themes, bitmap text, desktop rendering, cursor.
+// Everything is our own code - no external crates, no foreign sources.
+#![allow(unknown_lints, static_mut_refs, dead_code)]
 use crate::bootinfo::BootInfo;
 use crate::font;
 
+// ---- framebuffer (screen) ----
 static mut FB: *mut u32 = core::ptr::null_mut();
 static mut W: i32 = 0;
 static mut H: i32 = 0;
 static mut PPSL: i32 = 0;
+
+// ---- background buffer: the pre-rendered desktop (gradient + menubar +
+// wordmark + dock). The compositor blits this every frame, then draws the
+// windows on top. Fixed 2048x2048 covers every screen we target.
+pub const BG_W: i32 = 2048;
+pub const BG_H: i32 = 2048;
+pub static mut BG: [u32; (BG_W * BG_H) as usize] = [0; (BG_W * BG_H) as usize];
+static mut BG_OK: bool = false;
+
+// ---- current draw target (framebuffer, background, or app canvas) ----
+static mut T: *mut u32 = core::ptr::null_mut();
+static mut TW: i32 = 0;
+static mut TH: i32 = 0;
+static mut TPPSL: i32 = 0;
+
+// ---- clip rect (inclusive, absolute coordinates in the current target) ----
+static mut CL_X0: i32 = 0;
+static mut CL_Y0: i32 = 0;
+static mut CL_X1: i32 = 0;
+static mut CL_Y1: i32 = 0;
 
 pub fn fb_init(bi: &BootInfo) {
     unsafe {
@@ -14,14 +37,90 @@ pub fn fb_init(bi: &BootInfo) {
         W = bi.fb_width as i32;
         H = bi.fb_height as i32;
         PPSL = bi.fb_pitch_px as i32;
+        set_target_fb();
     }
 }
 
+/// draw into the framebuffer
+pub fn set_target_fb() {
+    unsafe {
+        T = FB;
+        TW = W;
+        TH = H;
+        TPPSL = PPSL;
+    }
+    clear_clip();
+}
+
+/// draw into an arbitrary pixel buffer
+pub fn set_target(p: *mut u32, w: i32, h: i32, ppsl: i32) {
+    unsafe {
+        T = p;
+        TW = w;
+        TH = h;
+        TPPSL = ppsl;
+    }
+    clear_clip();
+}
+
+/// draw into the background buffer (screen-sized window into the 2048x2048 BG)
+pub fn set_target_bg() {
+    unsafe {
+        let w = if W < BG_W { W } else { BG_W };
+        let h = if H < BG_H { H } else { BG_H };
+        T = BG.as_mut_ptr();
+        TW = w;
+        TH = h;
+        TPPSL = BG_W;
+    }
+    clear_clip();
+}
+
+// target dimensions (desktop layout uses these)
+pub fn tw() -> i32 {
+    unsafe { TW }
+}
+pub fn th() -> i32 {
+    unsafe { TH }
+}
+
+// screen dimensions
 pub fn width() -> i32 {
     unsafe { W }
 }
 pub fn height() -> i32 {
     unsafe { H }
+}
+
+// ---- clipping ----
+pub fn clear_clip() {
+    unsafe {
+        CL_X0 = 0;
+        CL_Y0 = 0;
+        CL_X1 = TW - 1;
+        CL_Y1 = TH - 1;
+    }
+}
+
+pub fn set_clip(x: i32, y: i32, w: i32, h: i32) {
+    unsafe {
+        let xa = if x < 0 { 0 } else { x };
+        let ya = if y < 0 { 0 } else { y };
+        let xb = (x + w - 1).min(TW - 1);
+        let yb = (y + h - 1).min(TH - 1);
+        if xa > xb || ya > yb {
+            // empty clip: reject everything
+            CL_X0 = 0;
+            CL_Y0 = 0;
+            CL_X1 = -1;
+            CL_Y1 = -1;
+        } else {
+            CL_X0 = xa;
+            CL_Y0 = ya;
+            CL_X1 = xb;
+            CL_Y1 = yb;
+        }
+    }
 }
 
 // colors are 0xAARRGGBB
@@ -39,21 +138,27 @@ pub fn mix(d: u32, s: u32, a: i32) -> u32 {
     0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
+#[inline]
 fn px(x: i32, y: i32, c: u32) {
     unsafe {
-        if x < 0 || y < 0 || x >= W || y >= H {
+        if x < CL_X0 || x > CL_X1 || y < CL_Y0 || y > CL_Y1 {
             return;
         }
-        *FB.offset((y * PPSL + x) as isize) = c;
+        *T.offset((y * TPPSL + x) as isize) = c;
     }
+}
+
+/// plot a single pixel into the current target (clipped)
+pub fn pset(x: i32, y: i32, c: u32) {
+    px(x, y, c)
 }
 
 pub fn px_blend(x: i32, y: i32, c: u32, a: i32) {
     unsafe {
-        if x < 0 || y < 0 || x >= W || y >= H {
+        if x < CL_X0 || x > CL_X1 || y < CL_Y0 || y > CL_Y1 {
             return;
         }
-        let p = FB.offset((y * PPSL + x) as isize);
+        let p = T.offset((y * TPPSL + x) as isize);
         *p = mix(*p, c, a);
     }
 }
@@ -69,33 +174,41 @@ fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
     }
 }
 
-fn fill_rect(x0: i32, y0: i32, w: i32, h: i32, c: u32) {
+pub fn fill_rect(x0: i32, y0: i32, w: i32, h: i32, c: u32) {
     unsafe {
-        let xa = clamp(x0, 0, W - 1);
-        let xb = clamp(x0 + w - 1, 0, W - 1);
-        let ya = clamp(y0, 0, H - 1);
-        let yb = clamp(y0 + h - 1, 0, H - 1);
-        for y in ya..=yb {
-            let row = FB.offset((y * PPSL) as isize);
-            for x in xa..=xb {
+        let xa = clamp(x0, CL_X0, CL_X1 + 1);
+        let xb = clamp(x0 + w - 1, CL_X0, CL_X1 + 1);
+        let ya = clamp(y0, CL_Y0, CL_Y1 + 1);
+        let yb = clamp(y0 + h - 1, CL_Y0, CL_Y1 + 1);
+        let mut y = ya;
+        while y <= yb {
+            let row = T.offset((y * TPPSL) as isize);
+            let mut x = xa;
+            while x <= xb {
                 *row.offset(x as isize) = c;
+                x += 1;
             }
+            y += 1;
         }
     }
 }
 
-fn blend_rect(x0: i32, y0: i32, w: i32, h: i32, c: u32, a: i32) {
+pub fn blend_rect(x0: i32, y0: i32, w: i32, h: i32, c: u32, a: i32) {
     unsafe {
-        let xa = clamp(x0, 0, W - 1);
-        let xb = clamp(x0 + w - 1, 0, W - 1);
-        let ya = clamp(y0, 0, H - 1);
-        let yb = clamp(y0 + h - 1, 0, H - 1);
-        for y in ya..=yb {
-            let row = FB.offset((y * PPSL) as isize);
-            for x in xa..=xb {
+        let xa = clamp(x0, CL_X0, CL_X1 + 1);
+        let xb = clamp(x0 + w - 1, CL_X0, CL_X1 + 1);
+        let ya = clamp(y0, CL_Y0, CL_Y1 + 1);
+        let yb = clamp(y0 + h - 1, CL_Y0, CL_Y1 + 1);
+        let mut y = ya;
+        while y <= yb {
+            let row = T.offset((y * TPPSL) as isize);
+            let mut x = xa;
+            while x <= xb {
                 let p = row.offset(x as isize);
                 *p = mix(*p, c, a);
+                x += 1;
             }
+            y += 1;
         }
     }
 }
@@ -114,7 +227,7 @@ pub fn isqrt(n: u64) -> u64 {
 }
 
 // scanline extents of a rounded rect in row y (0-based within the rect)
-fn rr_row(h: i32, r: i32, y: i32) -> i32 {
+pub fn rr_row(h: i32, r: i32, y: i32) -> i32 {
     if y < r {
         isqrt((r * r - (r - 1 - y) * (r - 1 - y)) as u64) as i32
     } else if y >= h - r {
@@ -124,7 +237,7 @@ fn rr_row(h: i32, r: i32, y: i32) -> i32 {
     }
 }
 
-fn round_rect_fill(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, c: u32) {
+pub fn round_rect_fill(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, c: u32) {
     if r > h / 2 {
         r = h / 2;
     }
@@ -139,7 +252,7 @@ fn round_rect_fill(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, c: u32) {
     }
 }
 
-fn round_rect_blend(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, c: u32, a: i32) {
+pub fn round_rect_blend(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, c: u32, a: i32) {
     if r > h / 2 {
         r = h / 2;
     }
@@ -155,7 +268,7 @@ fn round_rect_blend(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, c: u32, a: i32
 }
 
 // rounded rect outline (signed distance, integer math only)
-fn round_rect_stroke(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, t: i32, c: u32) {
+pub fn round_rect_stroke(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, t: i32, c: u32) {
     if r > h / 2 - t {
         r = h / 2 - t;
     }
@@ -228,7 +341,7 @@ pub fn draw_line_t(x0: i32, y0: i32, x1: i32, y1: i32, t: i32, c: u32) {
 }
 
 // fully filled circle
-fn circle_fill(cx: i32, cy: i32, r: i32, c: u32) {
+pub fn circle_fill(cx: i32, cy: i32, r: i32, c: u32) {
     for y in -r..=r {
         for x in -r..=r {
             if x * x + y * y <= r * r {
@@ -239,7 +352,7 @@ fn circle_fill(cx: i32, cy: i32, r: i32, c: u32) {
 }
 
 // circle ring
-fn ring_circle(cx: i32, cy: i32, r: i32, t: i32, c: u32) {
+pub fn ring_circle(cx: i32, cy: i32, r: i32, t: i32, c: u32) {
     for y in -(r + t)..=(r + t) {
         for x in -(r + t)..=(r + t) {
             let d = isqrt((x * x + y * y) as u64) as i32;
@@ -262,37 +375,64 @@ fn wifi_arc(cx: i32, cy: i32, r: i32, c: u32) {
     }
 }
 
-// --- desktop colors (LiquidGlass reference gradient) ---
-const C00: u32 = 0xFF29_2D63; // top left
-const C10: u32 = 0xFF6B_317F; // top right
-const C01: u32 = 0xFF59_2D6D; // bottom left
-const C11: u32 = 0xFF94_2E7D; // bottom right
+// ---- themes (desktop gradient palettes) ----
+pub const THEME_NAMES: [&str; 4] = ["AURORA", "SUNSET", "OCEAN", "FOREST"];
+
+// corner colors: [top-left, top-right, bottom-left, bottom-right]
+const THEME_COLS: [[u32; 4]; 4] = [
+    [0xFF292D63, 0xFF6B317F, 0xFF592D6D, 0xFF942E7D], // AURORA (classic)
+    [0xFF6E2C3C, 0xFFD97A3C, 0xFF943A63, 0xFFE8B05A], // SUNSET
+    [0xFF173F66, 0xFF2E86C1, 0xFF0E5E6F, 0xFF3EC1C9], // OCEAN
+    [0xFF1E4620, 0xFF4A7A2E, 0xFF14402E, 0xFF7AA53C], // FOREST
+];
+
+static mut THEME: usize = 0;
+
+pub fn theme_count() -> usize {
+    THEME_NAMES.len()
+}
+
+pub fn theme_name(i: usize) -> &'static str {
+    THEME_NAMES[i % THEME_NAMES.len()]
+}
+
+pub fn set_theme(i: usize) {
+    unsafe {
+        THEME = i % THEME_NAMES.len();
+    }
+}
+
+pub fn theme() -> usize {
+    unsafe { THEME }
+}
 
 /// gradient color at a single pixel (same formula as draw_gradient)
 pub fn gradient_color(x: i32, y: i32) -> u32 {
     unsafe {
-        let w = W;
-        let h = H;
+        let w = TW;
+        let h = TH;
         let u = ((x as i64) * 256 / ((w - 1).max(1) as i64)) as i32;
         let v = ((y as i64) * 256 / ((h - 1).max(1) as i64)) as i32;
+        let cols = THEME_COLS[THEME];
+        let (c00, c10, c01, c11) = (cols[0], cols[1], cols[2], cols[3]);
         let w00 = (256 - u) * (256 - v);
         let w10 = u * (256 - v);
         let w01 = (256 - u) * v;
         let w11 = u * v;
-        let r = (w00 * ((C00 >> 16) & 255) as i32
-            + w10 * ((C10 >> 16) & 255) as i32
-            + w01 * ((C01 >> 16) & 255) as i32
-            + w11 * ((C11 >> 16) & 255) as i32)
+        let r = (w00 * ((c00 >> 16) & 255) as i32
+            + w10 * ((c10 >> 16) & 255) as i32
+            + w01 * ((c01 >> 16) & 255) as i32
+            + w11 * ((c11 >> 16) & 255) as i32)
             >> 16;
-        let g = (w00 * ((C00 >> 8) & 255) as i32
-            + w10 * ((C10 >> 8) & 255) as i32
-            + w01 * ((C01 >> 8) & 255) as i32
-            + w11 * ((C11 >> 8) & 255) as i32)
+        let g = (w00 * ((c00 >> 8) & 255) as i32
+            + w10 * ((c10 >> 8) & 255) as i32
+            + w01 * ((c01 >> 8) & 255) as i32
+            + w11 * ((c11 >> 8) & 255) as i32)
             >> 16;
-        let b = (w00 * (C00 & 255) as i32
-            + w10 * (C10 & 255) as i32
-            + w01 * (C01 & 255) as i32
-            + w11 * (C11 & 255) as i32)
+        let b = (w00 * (c00 & 255) as i32
+            + w10 * (c10 & 255) as i32
+            + w01 * (c01 & 255) as i32
+            + w11 * (c11 & 255) as i32)
             >> 16;
         0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
     }
@@ -300,30 +440,32 @@ pub fn gradient_color(x: i32, y: i32) -> u32 {
 
 pub fn draw_gradient() {
     unsafe {
-        let (w, h) = (W, H);
+        let (w, h) = (TW, TH);
+        let cols = THEME_COLS[THEME];
+        let (c00, c10, c01, c11) = (cols[0], cols[1], cols[2], cols[3]);
         for y in 0..h {
             let v = ((y as i64) * 256 / (h - 1).max(1) as i64) as i32;
-            let row = FB.offset((y * PPSL) as isize);
+            let row = T.offset((y * TPPSL) as isize);
             for x in 0..w {
                 let u = ((x as i64) * 256 / (w - 1).max(1) as i64) as i32;
                 let w00 = (256 - u) * (256 - v);
                 let w10 = u * (256 - v);
                 let w01 = (256 - u) * v;
                 let w11 = u * v;
-                let r = (w00 * ((C00 >> 16) & 255) as i32
-                    + w10 * ((C10 >> 16) & 255) as i32
-                    + w01 * ((C01 >> 16) & 255) as i32
-                    + w11 * ((C11 >> 16) & 255) as i32)
+                let r = (w00 * ((c00 >> 16) & 255) as i32
+                    + w10 * ((c10 >> 16) & 255) as i32
+                    + w01 * ((c01 >> 16) & 255) as i32
+                    + w11 * ((c11 >> 16) & 255) as i32)
                     >> 16;
-                let g = (w00 * ((C00 >> 8) & 255) as i32
-                    + w10 * ((C10 >> 8) & 255) as i32
-                    + w01 * ((C01 >> 8) & 255) as i32
-                    + w11 * ((C11 >> 8) & 255) as i32)
+                let g = (w00 * ((c00 >> 8) & 255) as i32
+                    + w10 * ((c10 >> 8) & 255) as i32
+                    + w01 * ((c01 >> 8) & 255) as i32
+                    + w11 * ((c11 >> 8) & 255) as i32)
                     >> 16;
-                let b = (w00 * (C00 & 255) as i32
-                    + w10 * (C10 & 255) as i32
-                    + w01 * (C01 & 255) as i32
-                    + w11 * (C11 & 255) as i32)
+                let b = (w00 * (c00 & 255) as i32
+                    + w10 * (c10 & 255) as i32
+                    + w01 * (c01 & 255) as i32
+                    + w11 * (c11 & 255) as i32)
                     >> 16;
                 *row.offset(x as isize) =
                     0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
@@ -333,11 +475,11 @@ pub fn draw_gradient() {
 }
 
 pub fn draw_menubar() {
-    let w = width();
+    let w = tw();
     blend_rect(0, 0, w, 28, 0x0A0A0C, 150);
     blend_rect(0, 27, w, 1, 0xFFFFFF, 30);
 
-    // monogram on the left: stylized "A"
+    // monogram on the left: stylized "A" (also the About "menu")
     draw_line_t(14, 21, 18, 7, 2, 0xFFB9A8F5);
     draw_line_t(18, 7, 22, 21, 2, 0xFFF5A8E8);
     draw_line_t(16, 15, 20, 15, 2, 0xFFFFFFFF);
@@ -351,15 +493,15 @@ pub fn draw_menubar() {
     round_rect_stroke(bx, 9, 26, 13, 3, 2, 0xFFC8C8CC);
     fill_rect(bx + 3, 12, 15, 7, 0xFFE8E8EC);
     fill_rect(bx + 27, 12, 2, 7, 0xFFC8C8CC);
-
-    draw_clock(0);
 }
 
 // --- clock in the menubar (HH:MM:SS, bitmap digits) ---
 const CLOCK_SCALE: i32 = 2;
 const GLYPH_ADV: i32 = (font::GLYPH_W as i32 + 2) * CLOCK_SCALE; // advance per glyph
+const CLOCK_TW: i32 = 8 * GLYPH_ADV - 4 * CLOCK_SCALE;
+const CLOCK_X0: i32 = 96 + 8 + CLOCK_TW; // measured from the right edge
 
-fn draw_glyph(g: &[u8; 7], x0: i32, y0: i32, c: u32) {
+fn clock_glyph(g: &[u8; 7], x0: i32, y0: i32, c: u32) {
     for (row, bits) in g.iter().enumerate() {
         for col in 0..font::GLYPH_W {
             if bits & (0x8 >> col) != 0 {
@@ -374,37 +516,237 @@ fn draw_glyph(g: &[u8; 7], x0: i32, y0: i32, c: u32) {
     }
 }
 
-/// secs = seconds since boot; restore the background (menubar over gradient)
+/// draw the menubar clock onto the framebuffer (repaints its area from BG)
 pub fn draw_clock(secs: u64) {
-    let h = ((secs / 3600) % 24) as usize;
-    let m = ((secs / 60) % 60) as usize;
-    let s = (secs % 60) as usize;
-
-    let text_w = 8 * GLYPH_ADV - 4 * CLOCK_SCALE;
-    let x0 = width() - 96 - 8 - text_w; // left of wifi/battery
-    let y0 = 7;
-
-    // repaint the clock area: menubar color = gradient + dark blend
-    for y in y0 - 1..y0 + (font::GLYPH_H as i32) * CLOCK_SCALE + 1 {
-        for x in x0 - 2..x0 + text_w + 2 {
-            let base = mix(gradient_color(x, y), 0x0A0A0C, 150);
-            px(x, y, base);
+    unsafe {
+        clear_clip();
+        if !BG_OK {
+            return;
         }
-    }
+        let x0 = W - CLOCK_X0;
+        let y0 = 7;
 
-    // H H : M M : S S
-    let seq: [(usize, bool); 8] = [
-        (h / 10, false), (h % 10, false), (0, true),
-        (m / 10, false), (m % 10, false), (0, true),
-        (s / 10, false), (s % 10, false),
-    ];
-    for (i, (d, colon)) in seq.iter().enumerate() {
-        let glyph: &[u8; 7] = if *colon { &font::COLON } else { &font::DIGITS[*d] };
-        draw_glyph(glyph, x0 + (i as i32) * GLYPH_ADV, y0, 0xFFE8E8EC);
+        // repaint the clock area from the background buffer
+        for y in (y0 - 1)..(y0 + 16) {
+            if y < 0 || y >= H || y >= BG_H {
+                continue;
+            }
+            for x in (x0 - 2)..(x0 + CLOCK_TW + 2) {
+                if x < 0 || x >= W || x >= BG_W {
+                    continue;
+                }
+                let c = BG[y as usize * BG_W as usize + x as usize];
+                *FB.offset((y * PPSL + x) as isize) = c;
+            }
+        }
+
+        // H H : M M : S S
+        let h = ((secs / 3600) % 24) as usize;
+        let m = ((secs / 60) % 60) as usize;
+        let s = (secs % 60) as usize;
+        let seq: [(usize, bool); 8] = [
+            (h / 10, false), (h % 10, false), (0, true),
+            (m / 10, false), (m % 10, false), (0, true),
+            (s / 10, false), (s % 10, false),
+        ];
+        for (i, (d, colon)) in seq.iter().enumerate() {
+            let glyph: &[u8; 7] = if *colon { &font::COLON } else { &font::DIGITS[*d] };
+            clock_glyph(glyph, x0 + (i as i32) * GLYPH_ADV, y0, 0xFFE8E8EC);
+        }
     }
 }
 
-// --- mouse cursor (own arrow, background save/restore) ---
+// --- ASCII bitmap text (5x7 font, scaled) ---
+pub fn text_w(s: &str, sc: i32) -> i32 {
+    text_w_b(s.as_bytes(), sc)
+}
+
+pub fn text_w_b(b: &[u8], sc: i32) -> i32 {
+    if b.is_empty() {
+        0
+    } else {
+        (b.len() as i32 * 6 - 1) * sc
+    }
+}
+
+fn glyph5(ch: u8, x0: i32, y0: i32, sc: i32, c: u32) {
+    let idx = if ch < 32 || ch > 126 { 0 } else { (ch - 32) as usize };
+    for row in 0..font::A_H {
+        let bits = font::ASCII5[idx][row];
+        for col in 0..font::A_W {
+            if bits & (0x10 >> col) != 0 {
+                for oy in 0..sc {
+                    for ox in 0..sc {
+                        px(x0 + (col as i32) * sc + ox, y0 + (row as i32) * sc + oy, c);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// draw ASCII text (lowercase renders as uppercase glyphs)
+pub fn draw_text(x: i32, y: i32, s: &str, sc: i32, c: u32) {
+    draw_text_b(x, y, s.as_bytes(), sc, c);
+}
+
+/// draw ASCII text from raw bytes (for app text buffers)
+pub fn draw_text_b(x: i32, y: i32, b: &[u8], sc: i32, c: u32) {
+    let mut gx = x;
+    for &ch in b {
+        if ch != b' ' {
+            glyph5(ch, gx, y, sc, c);
+        }
+        gx += 6 * sc;
+    }
+}
+
+// --- dock (geometry shared with the window manager for hit tests) ---
+pub const DOCK_N: usize = 6;
+
+pub fn dock_geom() -> (i32, i32, i32, i32) {
+    let n = DOCK_N as i32;
+    let is = 44;
+    let gap = 10;
+    let pad = 12;
+    let dw = n * is + (n - 1) * gap + 2 * pad;
+    let dx0 = (tw() - dw) / 2;
+    let dy0 = th() - (is + 2 * pad) - 10;
+    (dx0, dy0, dw, is + 2 * pad)
+}
+
+/// icon square: (x, y, size)
+pub fn dock_icon_rect(i: usize) -> (i32, i32, i32) {
+    let (dx0, dy0, _, _) = dock_geom();
+    let is = 44;
+    let gap = 10;
+    let pad = 12;
+    (dx0 + pad + i as i32 * (is + gap), dy0 + pad, is)
+}
+
+pub fn draw_dock() {
+    let (dx0, dy0, dw, dh) = dock_geom();
+
+    round_rect_blend(dx0, dy0, dw, dh, 18, 0x14141A, 125);
+    round_rect_stroke(dx0, dy0, dw, dh, 18, 2, 0x3A3A46);
+
+    let tops: [u32; DOCK_N] = [0xFF4C9AFF, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA, 0xFFF87171, 0xFF94A3B8];
+    let bots: [u32; DOCK_N] = [0xFF1D4ED8, 0xFF059669, 0xFFD97706, 0xFF7C3AED, 0xFFDC2626, 0xFF475569];
+    for i in 0..DOCK_N {
+        let (ix, iy, is) = dock_icon_rect(i);
+        // icon body: vertical gradient
+        for y in 0..is {
+            let tt = y * 255 / (is - 1);
+            let c = mix(tops[i], bots[i], tt);
+            let d = rr_row(is, 12, y);
+            for x in ix + 12 - d..=ix + is - 1 - 12 + d {
+                px(x, iy + y, c);
+            }
+        }
+        let cx = ix + is / 2;
+        let cy = iy + is / 2;
+        let wh: u32 = 0xFFFFFFFF;
+        match i {
+            0 => {
+                // browser: globe
+                ring_circle(cx, cy, 9, 3, wh);
+                fill_rect(cx - 2, cy + 13, 4, 3, wh);
+            }
+            1 => {
+                // files: two bars
+                fill_rect(cx - 12, cy - 10, 24, 7, wh);
+                fill_rect(cx - 12, cy + 3, 24, 7, wh);
+            }
+            2 => {
+                // paint: brush triangle
+                draw_line_t(cx - 11, cy + 9, cx, cy - 10, 3, wh);
+                draw_line_t(cx, cy - 10, cx + 11, cy + 9, 3, wh);
+                draw_line_t(cx - 11, cy + 9, cx + 11, cy + 9, 3, wh);
+            }
+            3 => {
+                // terminal: frame
+                draw_line_t(cx - 10, cy - 10, cx + 10, cy - 10, 3, wh);
+                draw_line_t(cx + 10, cy - 10, cx + 10, cy + 10, 3, wh);
+                draw_line_t(cx + 10, cy + 10, cx - 10, cy + 10, 3, wh);
+                draw_line_t(cx - 10, cy + 10, cx - 10, cy - 10, 3, wh);
+            }
+            4 => {
+                // settings: gear-ish
+                ring_circle(cx, cy, 8, 3, wh);
+                draw_line_t(cx, cy - 13, cx, cy - 9, 3, wh);
+                draw_line_t(cx, cy + 9, cx, cy + 13, 3, wh);
+                draw_line_t(cx - 13, cy, cx - 9, cy, 3, wh);
+                draw_line_t(cx + 9, cy, cx + 13, cy, 3, wh);
+            }
+            _ => {
+                // calculator: slash + pad
+                draw_line_t(cx - 9, cy + 9, cx + 9, cy - 9, 3, wh);
+                fill_rect(cx - 12, cy + 6, 5, 5, wh);
+            }
+        }
+    }
+}
+
+// --- desktop background: render once, blit every frame ---
+fn bg_render() {
+    set_target_bg();
+    draw_gradient();
+    draw_menubar();
+    crate::logo::draw_wordmark(tw() / 2, th() * 40 / 100, 5);
+    draw_dock();
+    set_target_fb();
+}
+
+pub fn bg_init() {
+    bg_render();
+    unsafe {
+        BG_OK = true;
+    }
+}
+
+/// re-render the background (after a theme change)
+pub fn bg_regen() {
+    unsafe {
+        if BG_OK {
+            bg_render();
+        }
+    }
+}
+
+/// copy the pre-rendered desktop into the framebuffer (u64 bulk per row)
+pub fn blit_bg() {
+    unsafe {
+        if !BG_OK {
+            return;
+        }
+        let w = if W < BG_W { W } else { BG_W };
+        let h = if H < BG_H { H } else { BG_H };
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let wu = w as usize;
+        for y in 0..h {
+            let src = BG.as_ptr().add(y as usize * BG_W as usize);
+            let dst = FB.add(y as usize * PPSL as usize);
+            if (src as usize) & 7 == 0 && (dst as usize) & 7 == 0 {
+                let s64 = src as *const u64;
+                let d64 = dst as *mut u64;
+                for i in 0..wu / 2 {
+                    *d64.add(i) = *s64.add(i);
+                }
+                if wu & 1 != 0 {
+                    *dst.add(wu - 1) = *src.add(wu - 1);
+                }
+            } else {
+                for x in 0..wu {
+                    *dst.add(x) = *src.add(x);
+                }
+            }
+        }
+    }
+}
+
+// --- mouse cursor (own arrow; the compositor draws it last, no save/restore) ---
 const CUR_W: i32 = 12;
 const CUR_H: i32 = 19;
 
@@ -416,35 +758,28 @@ const CURSOR_SHAPE: [u16; 19] = [
 
 static mut CUR_X: i32 = 0;
 static mut CUR_Y: i32 = 0;
-static mut CUR_BG: [u32; 228] = [0; 228];
 
-fn save_cursor_bg() {
+pub fn cursor_pos() -> (i32, i32) {
+    unsafe { (CUR_X, CUR_Y) }
+}
+
+pub fn set_cursor(x: i32, y: i32) {
     unsafe {
-        let (x, y) = (CUR_X, CUR_Y);
-        for ry in 0..CUR_H {
-            for rx in 0..CUR_W {
-                let fx = clamp(x + rx, 0, W - 1);
-                let fy = clamp(y + ry, 0, H - 1);
-                CUR_BG[(ry * CUR_W + rx) as usize] =
-                    *FB.offset((fy * PPSL + fx) as isize);
-            }
-        }
+        CUR_X = clamp(x, 0, W - CUR_W);
+        CUR_Y = clamp(y, 0, H - CUR_H);
     }
 }
 
-fn restore_cursor_bg() {
+/// just place the cursor; drawing happens in the compositor redraw
+pub fn init_cursor() {
     unsafe {
-        let (x, y) = (CUR_X, CUR_Y);
-        for ry in 0..CUR_H {
-            for rx in 0..CUR_W {
-                let c = CUR_BG[(ry * CUR_W + rx) as usize];
-                px(x + rx, y + ry, c);
-            }
-        }
+        CUR_X = W / 2 - 6;
+        CUR_Y = H / 2 - 10;
     }
 }
 
-fn draw_cursor() {
+/// draw the arrow at the current position into the current target (framebuffer)
+pub fn draw_cursor() {
     unsafe {
         let (x, y) = (CUR_X, CUR_Y);
         for (ry, row) in CURSOR_SHAPE.iter().enumerate() {
@@ -455,105 +790,4 @@ fn draw_cursor() {
             }
         }
     }
-}
-
-pub fn init_cursor() {
-    unsafe {
-        CUR_X = W / 2 - 6;
-        CUR_Y = H / 2 - 10;
-    }
-    save_cursor_bg();
-    draw_cursor();
-}
-
-/// called from the IRQ12 dispatcher
-pub fn move_cursor(dx: i32, dy: i32, _buttons: u8, click: bool) {
-    restore_cursor_bg();
-    unsafe {
-        CUR_X = clamp(CUR_X + dx, 0, W - CUR_W);
-        CUR_Y = clamp(CUR_Y + dy, 0, H - CUR_H);
-    }
-    if click {
-        // click feedback: blend a soft bright rounded square
-        let cx = unsafe { CUR_X + 6 };
-        let cy = unsafe { CUR_Y + 10 };
-        round_rect_blend(cx - 22, cy - 22, 44, 44, 14, 0xFFFFFF, 60);
-    }
-    save_cursor_bg();
-    draw_cursor();
-}
-
-pub fn draw_dock() {
-    let (w, h) = (width(), height());
-    crate::serial::log("dock start\n");
-    let n = 6;
-    let is = 44;
-    let gap = 10;
-    let pad = 12;
-    let dw = n * is + (n - 1) * gap + 2 * pad;
-    let dx0 = (w - dw) / 2;
-    let dy0 = h - (is + 2 * pad) - 10;
-    let dh = is + 2 * pad;
-
-    round_rect_blend(dx0, dy0, dw, dh, 18, 0x14141A, 125);
-    round_rect_stroke(dx0, dy0, dw, dh, 18, 2, 0x3A3A46);
-    crate::serial::log("dock bg ok\n");
-
-    let tops: [u32; 6] = [0xFF4C9AFF, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA, 0xFFF87171, 0xFF94A3B8];
-    let bots: [u32; 6] = [0xFF1D4ED8, 0xFF059669, 0xFFD97706, 0xFF7C3AED, 0xFFDC2626, 0xFF475569];
-    for i in 0..n as usize {
-        let ix = dx0 + pad + i as i32 * (is + gap);
-        let iy = dy0 + pad;
-        crate::serial::log("icon ");
-        crate::serial::log_num(i);
-        crate::serial::log("\n");
-        // icon body: vertical gradient
-        for y in 0..is {
-            let tt = y * 255 / (is - 1);
-            let c = mix(tops[i], bots[i], tt);
-            let d = rr_row(is, 12, y);
-            for x in ix + 12 - d..=ix + is - 1 - 12 + d {
-                px_blend(x, iy + y, c, 255);
-            }
-        }
-        let cx = ix + is / 2;
-        let cy = iy + is / 2;
-        let wh: u32 = 0xFFFFFFFF;
-        match i {
-            0 => {
-                ring_circle(cx, cy, 9, 3, wh);
-                fill_rect(cx - 2, cy + 13, 4, 3, wh);
-            }
-            1 => {
-                fill_rect(cx - 12, cy - 10, 24, 7, wh);
-                fill_rect(cx - 12, cy + 3, 24, 7, wh);
-            }
-            2 => {
-                draw_line_t(cx - 11, cy + 9, cx, cy - 10, 3, wh);
-                draw_line_t(cx, cy - 10, cx + 11, cy + 9, 3, wh);
-                draw_line_t(cx - 11, cy + 9, cx + 11, cy + 9, 3, wh);
-            }
-            3 => {
-                draw_line_t(cx - 10, cy - 10, cx + 10, cy - 10, 3, wh);
-                draw_line_t(cx + 10, cy - 10, cx + 10, cy + 10, 3, wh);
-                draw_line_t(cx + 10, cy + 10, cx - 10, cy + 10, 3, wh);
-                draw_line_t(cx - 10, cy + 10, cx - 10, cy - 10, 3, wh);
-            }
-            4 => {
-                ring_circle(cx, cy, 8, 3, wh);
-                draw_line_t(cx, cy - 13, cx, cy - 9, 3, wh);
-                draw_line_t(cx, cy + 9, cx, cy + 13, 3, wh);
-                draw_line_t(cx - 13, cy, cx - 9, cy, 3, wh);
-                draw_line_t(cx + 9, cy, cx + 13, cy, 3, wh);
-            }
-            _ => {
-                draw_line_t(cx - 9, cy + 9, cx + 9, cy - 9, 3, wh);
-                fill_rect(cx - 12, cy + 6, 5, 5, wh);
-            }
-        }
-    }
-    // launch indicator under icon 1
-    blend_rect(dx0 + pad + is / 2 - 2, dy0 + is + pad + 4, 4, 4, 0xFFFFFF, 210);
-    crate::serial::log("dock marker ok\n");
-    let _ = circle_fill;
 }
