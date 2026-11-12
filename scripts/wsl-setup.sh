@@ -1,5 +1,5 @@
 #!/bin/bash
-# ASPECT OS - Rust-Toolchain installieren (falls fehlt)
+# ASPECT OS - install the Rust toolchain (if missing)
 set -e
 if [ ! -x /root/.cargo/bin/rustc ]; then
   export DEBIAN_FRONTEND=noninteractive

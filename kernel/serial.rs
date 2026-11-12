@@ -1,15 +1,6 @@
-// ASPECT OS - eigene serielle Debug-Ausgabe (COM1)
+// ASPECT OS - own serial debug output (COM1)
 #![allow(nonstandard_style)]
-use core::arch::asm;
-
-fn outb(port: u16, val: u8) {
-    unsafe { asm!("out dx, al", in("al") val, in("dx") port, options(nostack)) }
-}
-fn inb(port: u16) -> u8 {
-    let v: u8;
-    unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nostack)) };
-    v
-}
+use crate::io::{inb, outb};
 
 pub fn init() {
     outb(0x3F9, 0x00);
@@ -47,4 +38,24 @@ pub fn log_num(v: usize) {
         }
     }
     log(core::str::from_utf8(&buf[i..20]).unwrap_or("?"));
+}
+
+pub fn log_hex(v: u64) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut buf = [0u8; 18];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    let mut x = v;
+    let mut i = 17;
+    if x == 0 {
+        buf[2] = b'0';
+        i = 2;
+    }
+    while x > 0 {
+        buf[i] = HEX[(x & 0xF) as usize];
+        x >>= 4;
+        i -= 1;
+    }
+    log("0x");
+    log(core::str::from_utf8(&buf[i + 1..18]).unwrap_or("?"));
 }

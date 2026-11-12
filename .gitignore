@@ -17,7 +17,7 @@ qemu-test/*.ppm
 target/
 Cargo.lock
 
-# Design reference dataset (nur Farben/Motive, kein OS-Code)
+# Design reference dataset (colors/motifs only, no OS code)
 reference/
 
 # OS junk

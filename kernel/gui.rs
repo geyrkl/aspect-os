@@ -1,6 +1,7 @@
-// ASPECT OS - eigene GUI-Bibliothek in Rust: zeichnet direkt auf den Framebuffer
-// Gradient, Menueleiste, Dock - alles eigener Code.
+// ASPECT OS - own GUI library in Rust: draws directly to the framebuffer
+// Gradient, menubar, dock, clock, cursor - all our own code.
 use crate::bootinfo::BootInfo;
+use crate::font;
 
 static mut FB: *mut u32 = core::ptr::null_mut();
 static mut W: i32 = 0;
@@ -23,9 +24,9 @@ pub fn height() -> i32 {
     unsafe { H }
 }
 
-// Farben sind 0xAARRGGBB
+// colors are 0xAARRGGBB
 #[inline]
-fn mix(d: u32, s: u32, a: i32) -> u32 {
+pub fn mix(d: u32, s: u32, a: i32) -> u32 {
     let dr = (d & 255) as i32;
     let dg = ((d >> 8) & 255) as i32;
     let db = ((d >> 16) & 255) as i32;
@@ -112,7 +113,7 @@ pub fn isqrt(n: u64) -> u64 {
     x
 }
 
-// Scanline-Extents eines Rundrechtecks in Zeile y (0-basiert innerhalb)
+// scanline extents of a rounded rect in row y (0-based within the rect)
 fn rr_row(h: i32, r: i32, y: i32) -> i32 {
     if y < r {
         isqrt((r * r - (r - 1 - y) * (r - 1 - y)) as u64) as i32
@@ -153,7 +154,7 @@ fn round_rect_blend(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, c: u32, a: i32
     }
 }
 
-// Abgerundetes Rechteck als Rand (Signed-Distance, nur Ganzzahlen)
+// rounded rect outline (signed distance, integer math only)
 fn round_rect_stroke(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, t: i32, c: u32) {
     if r > h / 2 - t {
         r = h / 2 - t;
@@ -193,7 +194,7 @@ fn round_rect_stroke(x0: i32, y0: i32, w: i32, h: i32, mut r: i32, t: i32, c: u3
     }
 }
 
-// Dicker Linien-Strich (Bresenham + quadratischer Pinsel)
+// thick line (Bresenham + square brush)
 pub fn draw_line_t(x0: i32, y0: i32, x1: i32, y1: i32, t: i32, c: u32) {
     let dx = x1 - x0;
     let dy = y1 - y0;
@@ -201,7 +202,7 @@ pub fn draw_line_t(x0: i32, y0: i32, x1: i32, y1: i32, t: i32, c: u32) {
     let ady = dy.abs();
     let sx = if dx > 0 { 1 } else { -1 };
     let sy = if dy > 0 { 1 } else { -1 };
-    let mut err = adx - ady; // klassischer Bresenham-Startwert
+    let mut err = adx - ady; // classic Bresenham initial error
     let mut x = x0;
     let mut y = y0;
     let half = t / 2;
@@ -226,7 +227,7 @@ pub fn draw_line_t(x0: i32, y0: i32, x1: i32, y1: i32, t: i32, c: u32) {
     }
 }
 
-// Voll gefuellter Kreis
+// fully filled circle
 fn circle_fill(cx: i32, cy: i32, r: i32, c: u32) {
     for y in -r..=r {
         for x in -r..=r {
@@ -237,7 +238,7 @@ fn circle_fill(cx: i32, cy: i32, r: i32, c: u32) {
     }
 }
 
-// Kreisring
+// circle ring
 fn ring_circle(cx: i32, cy: i32, r: i32, t: i32, c: u32) {
     for y in -(r + t)..=(r + t) {
         for x in -(r + t)..=(r + t) {
@@ -249,7 +250,7 @@ fn ring_circle(cx: i32, cy: i32, r: i32, t: i32, c: u32) {
     }
 }
 
-// Wifi-Bogen (Kegel nach oben)
+// wifi arc (cone pointing up)
 fn wifi_arc(cx: i32, cy: i32, r: i32, c: u32) {
     for y in -(r + 2)..=(r + 2) {
         for x in -(r + 2)..=(r + 2) {
@@ -261,11 +262,41 @@ fn wifi_arc(cx: i32, cy: i32, r: i32, c: u32) {
     }
 }
 
-// --- Desktop-Farben (LiquidGlass-Referenz-Gradient) ---
-const C00: u32 = 0xFF29_2D63; // oben links
-const C10: u32 = 0xFF6B_317F; // oben rechts
-const C01: u32 = 0xFF59_2D6D; // unten links
-const C11: u32 = 0xFF94_2E7D; // unten rechts
+// --- desktop colors (LiquidGlass reference gradient) ---
+const C00: u32 = 0xFF29_2D63; // top left
+const C10: u32 = 0xFF6B_317F; // top right
+const C01: u32 = 0xFF59_2D6D; // bottom left
+const C11: u32 = 0xFF94_2E7D; // bottom right
+
+/// gradient color at a single pixel (same formula as draw_gradient)
+pub fn gradient_color(x: i32, y: i32) -> u32 {
+    unsafe {
+        let w = W;
+        let h = H;
+        let u = ((x as i64) * 256 / ((w - 1).max(1) as i64)) as i32;
+        let v = ((y as i64) * 256 / ((h - 1).max(1) as i64)) as i32;
+        let w00 = (256 - u) * (256 - v);
+        let w10 = u * (256 - v);
+        let w01 = (256 - u) * v;
+        let w11 = u * v;
+        let r = (w00 * ((C00 >> 16) & 255) as i32
+            + w10 * ((C10 >> 16) & 255) as i32
+            + w01 * ((C01 >> 16) & 255) as i32
+            + w11 * ((C11 >> 16) & 255) as i32)
+            >> 16;
+        let g = (w00 * ((C00 >> 8) & 255) as i32
+            + w10 * ((C10 >> 8) & 255) as i32
+            + w01 * ((C01 >> 8) & 255) as i32
+            + w11 * ((C11 >> 8) & 255) as i32)
+            >> 16;
+        let b = (w00 * (C00 & 255) as i32
+            + w10 * (C10 & 255) as i32
+            + w01 * (C01 & 255) as i32
+            + w11 * (C11 & 255) as i32)
+            >> 16;
+        0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+    }
+}
 
 pub fn draw_gradient() {
     unsafe {
@@ -306,12 +337,12 @@ pub fn draw_menubar() {
     blend_rect(0, 0, w, 28, 0x0A0A0C, 150);
     blend_rect(0, 27, w, 1, 0xFFFFFF, 30);
 
-    // Monogramm links: stilisiertes "A"
+    // monogram on the left: stylized "A"
     draw_line_t(14, 21, 18, 7, 2, 0xFFB9A8F5);
     draw_line_t(18, 7, 22, 21, 2, 0xFFF5A8E8);
     draw_line_t(16, 15, 20, 15, 2, 0xFFFFFFFF);
 
-    // rechts: Wifi + Batterie
+    // right side: wifi + battery
     let wx = w - 96;
     wifi_arc(wx, 24, 9, 0xFFE8E8EC);
     wifi_arc(wx, 24, 5, 0xFFE8E8EC);
@@ -320,6 +351,136 @@ pub fn draw_menubar() {
     round_rect_stroke(bx, 9, 26, 13, 3, 2, 0xFFC8C8CC);
     fill_rect(bx + 3, 12, 15, 7, 0xFFE8E8EC);
     fill_rect(bx + 27, 12, 2, 7, 0xFFC8C8CC);
+
+    draw_clock(0);
+}
+
+// --- clock in the menubar (HH:MM:SS, bitmap digits) ---
+const CLOCK_SCALE: i32 = 2;
+const GLYPH_ADV: i32 = (font::GLYPH_W as i32 + 2) * CLOCK_SCALE; // advance per glyph
+
+fn draw_glyph(g: &[u8; 7], x0: i32, y0: i32, c: u32) {
+    for (row, bits) in g.iter().enumerate() {
+        for col in 0..font::GLYPH_W {
+            if bits & (0x8 >> col) != 0 {
+                for oy in 0..CLOCK_SCALE {
+                    for ox in 0..CLOCK_SCALE {
+                        px(x0 + (col as i32) * CLOCK_SCALE + ox,
+                           y0 + (row as i32) * CLOCK_SCALE + oy, c);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// secs = seconds since boot; restore the background (menubar over gradient)
+pub fn draw_clock(secs: u64) {
+    let h = ((secs / 3600) % 24) as usize;
+    let m = ((secs / 60) % 60) as usize;
+    let s = (secs % 60) as usize;
+
+    let text_w = 8 * GLYPH_ADV - 4 * CLOCK_SCALE;
+    let x0 = width() - 96 - 8 - text_w; // left of wifi/battery
+    let y0 = 7;
+
+    // repaint the clock area: menubar color = gradient + dark blend
+    for y in y0 - 1..y0 + (font::GLYPH_H as i32) * CLOCK_SCALE + 1 {
+        for x in x0 - 2..x0 + text_w + 2 {
+            let base = mix(gradient_color(x, y), 0x0A0A0C, 150);
+            px(x, y, base);
+        }
+    }
+
+    // H H : M M : S S
+    let seq: [(usize, bool); 8] = [
+        (h / 10, false), (h % 10, false), (0, true),
+        (m / 10, false), (m % 10, false), (0, true),
+        (s / 10, false), (s % 10, false),
+    ];
+    for (i, (d, colon)) in seq.iter().enumerate() {
+        let glyph: &[u8; 7] = if *colon { &font::COLON } else { &font::DIGITS[*d] };
+        draw_glyph(glyph, x0 + (i as i32) * GLYPH_ADV, y0, 0xFFE8E8EC);
+    }
+}
+
+// --- mouse cursor (own arrow, background save/restore) ---
+const CUR_W: i32 = 12;
+const CUR_H: i32 = 19;
+
+// classic arrow, bit 11 = left column
+const CURSOR_SHAPE: [u16; 19] = [
+    0x800, 0xC00, 0xE00, 0xF00, 0xF80, 0xFC0, 0xFE0, 0xFF0, 0xFF8, 0xFFC,
+    0xFFE, 0xFFC, 0xFE0, 0xF80, 0xEC0, 0x860, 0x030, 0x018, 0x00C,
+];
+
+static mut CUR_X: i32 = 0;
+static mut CUR_Y: i32 = 0;
+static mut CUR_BG: [u32; 228] = [0; 228];
+
+fn save_cursor_bg() {
+    unsafe {
+        let (x, y) = (CUR_X, CUR_Y);
+        for ry in 0..CUR_H {
+            for rx in 0..CUR_W {
+                let fx = clamp(x + rx, 0, W - 1);
+                let fy = clamp(y + ry, 0, H - 1);
+                CUR_BG[(ry * CUR_W + rx) as usize] =
+                    *FB.offset((fy * PPSL + fx) as isize);
+            }
+        }
+    }
+}
+
+fn restore_cursor_bg() {
+    unsafe {
+        let (x, y) = (CUR_X, CUR_Y);
+        for ry in 0..CUR_H {
+            for rx in 0..CUR_W {
+                let c = CUR_BG[(ry * CUR_W + rx) as usize];
+                px(x + rx, y + ry, c);
+            }
+        }
+    }
+}
+
+fn draw_cursor() {
+    unsafe {
+        let (x, y) = (CUR_X, CUR_Y);
+        for (ry, row) in CURSOR_SHAPE.iter().enumerate() {
+            for rx in 0..CUR_W {
+                if row & (0x800 >> rx) != 0 {
+                    px(x + rx, y + ry as i32, 0xFF14141A); // dark arrow
+                }
+            }
+        }
+    }
+}
+
+pub fn init_cursor() {
+    unsafe {
+        CUR_X = W / 2 - 6;
+        CUR_Y = H / 2 - 10;
+    }
+    save_cursor_bg();
+    draw_cursor();
+}
+
+/// called from the IRQ12 dispatcher
+pub fn move_cursor(dx: i32, dy: i32, _buttons: u8, click: bool) {
+    restore_cursor_bg();
+    unsafe {
+        CUR_X = clamp(CUR_X + dx, 0, W - CUR_W);
+        CUR_Y = clamp(CUR_Y + dy, 0, H - CUR_H);
+    }
+    if click {
+        // click feedback: blend a soft bright rounded square
+        let cx = unsafe { CUR_X + 6 };
+        let cy = unsafe { CUR_Y + 10 };
+        round_rect_blend(cx - 22, cy - 22, 44, 44, 14, 0xFFFFFF, 60);
+    }
+    save_cursor_bg();
+    draw_cursor();
 }
 
 pub fn draw_dock() {
@@ -346,7 +507,7 @@ pub fn draw_dock() {
         crate::serial::log("icon ");
         crate::serial::log_num(i);
         crate::serial::log("\n");
-        // Icon-Koerper: vertikaler Gradient
+        // icon body: vertical gradient
         for y in 0..is {
             let tt = y * 255 / (is - 1);
             let c = mix(tops[i], bots[i], tt);
@@ -391,7 +552,7 @@ pub fn draw_dock() {
             }
         }
     }
-    // Startpunkt-Marker unter Icon 1
+    // launch indicator under icon 1
     blend_rect(dx0 + pad + is / 2 - 2, dy0 + is + pad + 4, 4, 4, 0xFFFFFF, 210);
     crate::serial::log("dock marker ok\n");
     let _ = circle_fill;

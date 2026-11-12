@@ -1,6 +1,6 @@
 #!/bin/bash
-# ASPECT OS - QEMU-Test mit OVMF (UEFI) + QMP-Screendump
-# Runtime-Artefakte (Socket/PID/Screens) liegen im Linux-FS, Ergebnisse nach C:
+# ASPECT OS - QEMU test with OVMF (UEFI) + QMP screendump
+# runtime artifacts (socket/pid/screens) live in the Linux FS, results go to C:
 set -e
 cd "$(dirname "$0")/.."
 OUT=/root/aspect-qemu
@@ -27,7 +27,7 @@ qemu-system-x86_64 \
   -daemonize
 sleep 2
 echo "[QEMU] PID: $(cat "$OUT/qemu.pid")"
-echo "[QEMU] warte 15s auf Desktop ..."
+echo "[QEMU] waiting 15s for desktop ..."
 sleep 15
 
 python3 - "$OUT" <<'PYEOF'
@@ -48,6 +48,36 @@ rd()
 s.sendall(b'{"execute":"qmp_capabilities"}\n'); rd()
 s.sendall(b'{"execute":"screendump","arguments":{"filename":"' + out.encode() + b'/01-desktop.ppm"}}\n')
 rd()
+time.sleep(3.2)
+s.sendall(b'{"execute":"screendump","arguments":{"filename":"' + out.encode() + b'/02-clock.ppm"}}\n')
+rd()
+
+# --- M3 test: move mouse + click, type keys ---
+def inp(events):
+    s.sendall(b'{"execute":"input-send-event","arguments":{"events":' + events + b'}}\n')
+    rd()
+
+# move the cursor from center to bottom right (pauses keep the ps2 queue in sync)
+inp(b'[{"type":"rel","data":{"axis":"x","value":150}}]')
+time.sleep(0.2)
+inp(b'[{"type":"rel","data":{"axis":"y","value":100}}]')
+time.sleep(0.2)
+inp(b'[{"type":"rel","data":{"axis":"x","value":60}}]')
+time.sleep(0.2)
+inp(b'[{"type":"rel","data":{"axis":"y","value":40}}]')
+time.sleep(0.6)
+# left click
+inp(b'[{"type":"btn","data":{"down":true,"button":"left"}}]')
+inp(b'[{"type":"btn","data":{"down":false,"button":"left"}}]')
+time.sleep(0.6)
+# keyboard: q, e, v (send-key -> i8042 -> IRQ1)
+for k in (b'q', b'e', b'v'):
+    s.sendall(b'{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"' + k + b'"}]}}\n')
+    rd()
+    time.sleep(0.3)
+time.sleep(1.0)
+s.sendall(b'{"execute":"screendump","arguments":{"filename":"' + out.encode() + b'/03-input.ppm"}}\n')
+rd()
 time.sleep(1.5)
 PYEOF
 
@@ -55,8 +85,18 @@ if [ -f "$OUT/01-desktop.ppm" ]; then
   convert "$OUT/01-desktop.ppm" "$OUT/01-desktop.png"
   rm -f "$OUT/01-desktop.ppm"
 fi
+if [ -f "$OUT/02-clock.ppm" ]; then
+  convert "$OUT/02-clock.ppm" "$OUT/02-clock.png"
+  rm -f "$OUT/02-clock.ppm"
+fi
+if [ -f "$OUT/03-input.ppm" ]; then
+  convert "$OUT/03-input.ppm" "$OUT/03-input.png"
+  rm -f "$OUT/03-input.ppm"
+fi
 mkdir -p /mnt/c/Klemens/Coding/Aspect\ OS/docs/screenshots
 cp -f "$OUT/01-desktop.png" /mnt/c/Klemens/Coding/Aspect\ OS/docs/screenshots/ 2>/dev/null || true
+cp -f "$OUT/02-clock.png" /mnt/c/Klemens/Coding/Aspect\ OS/docs/screenshots/ 2>/dev/null || true
+cp -f "$OUT/03-input.png" /mnt/c/Klemens/Coding/Aspect\ OS/docs/screenshots/ 2>/dev/null || true
 echo "--- serial.log ---"
-cat "$OUT/serial.log" 2>/dev/null || echo "(kein serial.log)"
+cat "$OUT/serial.log" 2>/dev/null || echo "(no serial.log)"
 ls -la "$OUT"

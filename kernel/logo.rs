@@ -1,4 +1,4 @@
-// ASPECT OS - Wordmark "ASPECT OS": Vektor-Strokes in Rust
+// ASPECT OS - wordmark "ASPECT OS": vector strokes in Rust
 use crate::gui::{draw_line_t, px_blend};
 
 #[derive(Clone, Copy)]
@@ -9,7 +9,7 @@ struct Seg {
     y1: i32,
 }
 
-// Buchstaben im 8-hohen Raster
+// letters on an 8-tall grid
 const SEG_A: [Seg; 3] = [
     Seg { x0: 0, y0: 7, x1: 3, y1: 0 },
     Seg { x0: 3, y0: 0, x1: 6, y1: 7 },
@@ -56,7 +56,7 @@ const SEG_O: [Seg; 8] = [
     Seg { x0: 0, y0: 1, x1: 1, y1: 0 },
 ];
 
-// "ASPECT OS": Buchstaben mit Segmenten, 0 = Leerzeichen
+// "ASPECT OS": letters with segments, 0 = space
 static LETTERS: [&[Seg]; 9] =
     [&SEG_A, &SEG_S, &SEG_P, &SEG_E, &SEG_C, &SEG_T, &[], &SEG_O, &SEG_S];
 static WIDTHS: [i32; 9] = [6, 6, 6, 6, 6, 6, 4, 6, 6];
@@ -84,7 +84,7 @@ fn draw_seg(s: &Seg, x0: i32, y0: i32, sc: i32, t: i32, c: u32, alpha: i32) {
     }
 }
 
-// cx, cy = Mittelpunkt des Wordmarks, sc = Skalierung (px pro Rastereinheit)
+// cx, cy = wordmark center, sc = scale (px per grid unit)
 pub fn draw_wordmark(cx: i32, cy: i32, sc: i32) {
     let mut total = 0;
     for &w in WIDTHS.iter() {
@@ -92,7 +92,7 @@ pub fn draw_wordmark(cx: i32, cy: i32, sc: i32) {
     }
     total -= 2 * sc;
 
-    // Schlagschatten
+    // drop shadow
     let off = sc / 2 + 1;
     let mut x = cx - total / 2;
     for (i, segs) in LETTERS.iter().enumerate() {
@@ -105,7 +105,7 @@ pub fn draw_wordmark(cx: i32, cy: i32, sc: i32) {
         }
         x += WIDTHS[i] * sc + 2 * sc;
     }
-    // Hauptstriche
+    // main strokes
     let mut x = cx - total / 2;
     for (i, segs) in LETTERS.iter().enumerate() {
         if segs.is_empty() {

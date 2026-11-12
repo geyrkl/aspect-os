@@ -1,14 +1,14 @@
-// ASPECT OS - eigener UEFI-Bootloader in Rust (keine Fremd-Crates, kein GNU-EFI)
-// Aufgaben: Bildschirmmodus (GOP), eingebetteten Kernel nach 0x100000 kopieren,
-//           Boot-Services verlassen, Handover.
-// Der Kernel ist direkt eingebettet -> kein Dateisystem noetig, ein Binary = alles.
+// ASPECT OS - own UEFI bootloader in Rust (no foreign crates, no GNU-EFI)
+// Tasks: screen mode (GOP), copy embedded kernel to 0x100000,
+//        exit boot services, handover.
+// The kernel is embedded directly -> no filesystem needed, one binary = everything.
 #![no_std]
 #![no_main]
 #![allow(nonstandard_style, dead_code)]
 use core::arch::asm;
 use core::panic::PanicInfo;
 
-// Kernel-Binary wird beim Build eingebettet (Makefile baut kernel.bin zuerst)
+// kernel binary is embedded at build time (Makefile builds kernel.bin first)
 static KERNEL: &[u8] = include_bytes!("../build/kernel.bin");
 
 #[panic_handler]
@@ -18,7 +18,7 @@ fn panic(_i: &PanicInfo) -> ! {
     }
 }
 
-// ---- Basis-Typen ----
+// ---- basic types ----
 type UINTN = u64;
 type EFI_STATUS = u64;
 type EFI_HANDLE = u64;
@@ -46,7 +46,16 @@ const GOP_GUID: Guid = Guid {
     d: [0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A],
 };
 
-// ---- BootInfo (identisch zum Kernel) ----
+// ---- BootInfo (identical to the kernel) ----
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MemRegion {
+    ty: u32,
+    _pad: u32,
+    base: u64,
+    pages: u64,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BootInfo {
@@ -56,9 +65,12 @@ struct BootInfo {
     fb_pitch_px: u32,
     fb_bpp: u32,
     kernel_size: u64,
+    mem_count: u32,
+    _pad: u32,
+    mem: [MemRegion; 96],
 }
 
-// ---- UEFI-Funktionszeiger (extern "C" == MS x64 == EFI-ABI) ----
+// ---- UEFI function pointers (extern "C" == MS x64 == EFI ABI) ----
 type FnOutputString = extern "C" fn(*mut SimpleTextOut, *const u16) -> EFI_STATUS;
 type FnGetMemoryMap = extern "C" fn(
     *mut UINTN,
@@ -196,7 +208,7 @@ struct GopMode {
     _fb_size: UINTN,
 }
 
-// ---- Serial (COM1, eigene Routinen, Intel-Syntax-asm) ----
+// ---- serial (COM1, own routines, Intel-syntax asm) ----
 fn outb(port: u16, val: u8) {
     unsafe { asm!("out dx, al", in("al") val, in("dx") port, options(nostack)) }
 }
@@ -225,7 +237,7 @@ fn serial_log(s: &str) {
     }
 }
 
-// ---- Konsole + Fehler ----
+// ---- console + errors ----
 struct Ctx {
     st: *mut SystemTable,
     gop: *mut Gop,
@@ -262,7 +274,7 @@ unsafe fn fatal(ctx: &Ctx, msg: &str) -> ! {
     }
 }
 
-// ---- Handover: Stack wechseln, rdi = BootInfo (fest in rdi), Kernel aufrufen ----
+// ---- handover: switch stack, rdi = BootInfo (fixed in rdi), call kernel ----
 unsafe fn handoff(entry: u64, bi: u64, stack: u64) -> ! {
     asm!(
         "mov rsp, {stk}",
@@ -285,7 +297,7 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
         ((*bs).set_watchdog_timer)(0, 0, 0, core::ptr::null());
         con_print(&ctx, "ASPECT OS bootloader\r\n");
 
-        // --- GOP: hoechste Aufloesung suchen ---
+        // --- GOP: find the highest resolution ---
         let mut gop_ptr: *mut u8 = core::ptr::null_mut();
         if ((*bs).locate_protocol)(&GOP_GUID, core::ptr::null(), &mut gop_ptr) != EFI_SUCCESS {
             fatal(&ctx, "no GOP");
@@ -303,7 +315,7 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
                 continue;
             }
             if (*info).pixel_format != 1 {
-                // 1 = BlueGreenRedReserved (0xAARRGGBB im Speicher)
+                // 1 = BlueGreenRedReserved (0xAARRGGBB in memory)
                 continue;
             }
             let area = (*info).h_res as u64 * (*info).v_res as u64;
@@ -319,7 +331,7 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
         if ((*gop).set_mode)(gop, best) != EFI_SUCCESS {
             fatal(&ctx, "SetMode failed");
         }
-        // Bildschirm schwarz
+        // screen black
         let fb = (*(*gop).mode).fb_base as *mut u32;
         let px = (*(*(*gop).mode).info).scanline_px as usize;
         let w = (*(*(*gop).mode).info).h_res as usize;
@@ -332,7 +344,7 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
         con_print(&ctx, "video mode set\r\n");
         serial_log("video mode set\n");
 
-        // --- Kernel: direkt eingebettet, nach 0x100000 kopieren ---
+        // --- kernel: embedded directly, copy to 0x100000 ---
         let ksize = KERNEL.len() as u64;
         let mut kbase: u64 = 0x100000;
         let kpages = ((ksize + 0xFFFFF) >> 20).max(4);
@@ -358,6 +370,11 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
             fatal(&ctx, "AllocatePool BootInfo failed");
         }
         let bi = bi_ptr as *mut BootInfo;
+        // pool memory is not zeroed -> clear the whole BootInfo
+        let bi_bytes = core::mem::size_of::<BootInfo>();
+        for i in 0..bi_bytes {
+            (bi_ptr.add(i)).write_volatile(0);
+        }
         (*bi).fb_base = (*(*gop).mode).fb_base;
         (*bi).fb_width = (*(*(*gop).mode).info).h_res;
         (*bi).fb_height = (*(*(*gop).mode).info).v_res;
@@ -365,14 +382,14 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
         (*bi).fb_bpp = 32;
         (*bi).kernel_size = ksize;
 
-        // --- eigener Stack ---
+        // --- own stack ---
         let mut stack_mem: *mut u8 = core::ptr::null_mut();
         if ((*bs).allocate_pool)(EFI_LOADER_DATA, 65536, &mut stack_mem) != EFI_SUCCESS {
             fatal(&ctx, "AllocatePool stack failed");
         }
         let stack = (stack_mem as u64) + 65536;
 
-        // --- Memory-Map + ExitBootServices (Retry) ---
+        // --- memory map + ExitBootServices (with retry) ---
         con_print(&ctx, "handing off...\r\n");
         serial_log("exiting boot services\n");
         let mut msize: UINTN = 0;
@@ -401,9 +418,22 @@ extern "C" fn efi_main(image: EFI_HANDLE, st: *mut SystemTable) -> EFI_STATUS {
             if st1 != EFI_SUCCESS {
                 fatal(&ctx, "GetMemoryMap failed");
             }
+            // copy the memory map into BootInfo (before ExitBootServices)
+            let count = (msize / dsize) as u32;
+            let src = map as *const MemDesc;
+            let mut i: u32 = 0;
+            while i < count && (i as usize) < 96 {
+                let d = src.add(i as usize);
+                (*bi).mem[i as usize].ty = (*d).mtype;
+                (*bi).mem[i as usize].base = (*d).phys_start;
+                (*bi).mem[i as usize].pages = (*d).num_pages;
+                i += 1;
+            }
+            (*bi).mem_count = i;
+            serial_log("memmap ok\n");
             let st2 = ((*bs).exit_boot_services)(image, mkey);
             if st2 == EFI_INVALID_PARAMETER {
-                continue; // Map geaendert -> neu holen
+                continue; // map changed -> fetch again
             }
             if st2 != EFI_SUCCESS {
                 fatal(&ctx, "ExitBootServices failed");

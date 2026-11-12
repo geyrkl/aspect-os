@@ -1,5 +1,5 @@
 #!/bin/bash
-# ASPECT OS - live starten (Fenster via WSLg)
+# ASPECT OS - start live (window via WSLg)
 CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 VARS=/tmp/aspect-os-vars.fd
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$VARS" 2>/dev/null || cp "$VARS" "$VARS"
