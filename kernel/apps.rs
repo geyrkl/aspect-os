@@ -1240,8 +1240,21 @@ fn browser_draw(x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-fn browser_navigate() {
+/// show the offline manual page in the browser (menubar HELP menu);
+/// call AFTER wm::open(Browser) - on_open resets the page
+pub fn show_manual() {
     unsafe {
+        B_PAGE = B_MANUAL;
+        B_EDIT = false;
+        B_URL_LEN = 6;
+        let u = b"MANUAL";
+        for i in 0..B_URL_LEN {
+            B_URL[i] = u[i];
+        }
+    }
+}
+
+fn browser_navigate() {    unsafe {
         let mut up = [0u8; 24];
         for i in 0..B_URL_LEN {
             up[i] = B_URL[i].to_ascii_uppercase();

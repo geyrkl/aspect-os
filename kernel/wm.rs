@@ -218,12 +218,307 @@ fn dock_app(i: usize) -> AppId {
     }
 }
 
+// =====================================================================
+// macOS-style menubar menus: monogram, app name, FILE, VIEW, WINDOW, HELP
+// =====================================================================
+
+const ACCENT: u32 = 0xFF3E5E8E; // menu highlight blue (matches Settings)
+const MENU_N: i32 = 6; // 0 monogram, 1 app, 2 FILE, 3 VIEW, 4 WINDOW, 5 HELP
+static mut MENU_OPEN: i32 = -1;
+static mut MENU_HOVER: i32 = -1; // item row under the cursor
+
+/// the focused app's name for the menubar (macOS shows "Finder" when
+/// no window is open)
+fn app_menu_name() -> &'static str {
+    unsafe {
+        if N > 0 {
+            if let Some(w) = WINS[N - 1] {
+                return apps::title(w.app);
+            }
+        }
+    }
+    "FINDER"
+}
+
+const MENU_TITLES: [&str; 4] = ["FILE", "VIEW", "WINDOW", "HELP"];
+
+/// hit rect (x0, x1) of menubar menu m
+fn menu_rect(m: i32) -> (i32, i32) {
+    if m == 0 {
+        return (6, 30); // monogram
+    }
+    let mut x = 38i32;
+    let aw = gui::text_w(app_menu_name(), 2);
+    if m == 1 {
+        return (x, x + aw);
+    }
+    x += aw + 18;
+    for (k, t) in MENU_TITLES.iter().enumerate() {
+        let tw = gui::text_w(t, 2);
+        if m == k as i32 + 2 {
+            return (x, x + tw);
+        }
+        x += tw + 18;
+    }
+    (x, x)
+}
+
+/// bar title of menu m (empty for the monogram, which is vector strokes)
+fn menu_title(m: i32) -> &'static str {
+    match m {
+        1 => app_menu_name(),
+        2 => "FILE",
+        3 => "VIEW",
+        4 => "WINDOW",
+        5 => "HELP",
+        _ => "",
+    }
+}
+
+/// number of rows in menu m (0 = the menu cannot be opened); separator
+/// rows count as rows
+fn menu_len(m: i32) -> usize {
+    match m {
+        0 => 3, // ABOUT THIS OS | SETTINGS
+        1 => unsafe { if N > 0 { 1 } else { 0 } },
+        2 => 6, // four app opens | CLOSE WINDOW
+        3 => 4, // themes
+        4 => unsafe { N },
+        5 => 1, // OPEN MANUAL
+        _ => 0,
+    }
+}
+
+/// label of row r in menu m; None = separator row (or out of range)
+fn menu_label(m: i32, r: usize) -> Option<&'static str> {
+    if r >= menu_len(m) {
+        return None;
+    }
+    match m {
+        0 => match r {
+            0 => Some("ABOUT THIS OS"),
+            2 => Some("SETTINGS"),
+            _ => None,
+        },
+        1 => Some("CLOSE WINDOW"),
+        2 => match r {
+            0 => Some("OPEN FILES"),
+            1 => Some("OPEN TERMINAL"),
+            2 => Some("OPEN PAINT"),
+            3 => Some("OPEN BROWSER"),
+            5 => Some("CLOSE WINDOW"),
+            _ => None,
+        },
+        3 => Some(gui::theme_name(r)),
+        4 => unsafe {
+            match WINS[r] {
+                Some(w) => Some(apps::title(w.app)),
+                None => None,
+            }
+        },
+        5 => Some("OPEN MANUAL"),
+        _ => None,
+    }
+}
+
+/// does row r carry the active check mark?
+fn menu_checked(m: i32, r: usize) -> bool {
+    match m {
+        3 => gui::theme() == r,
+        4 => unsafe { r + 1 == N },
+        _ => false,
+    }
+}
+
+/// run the action behind row r of menu m (the menu is already closed)
+fn run_item(m: i32, r: usize) {
+    match m {
+        0 => {
+            if r == 0 {
+                open(AppId::About);
+            } else if r == 2 {
+                open(AppId::Settings);
+            }
+        }
+        1 => unsafe {
+            if N > 0 {
+                close(N - 1);
+            }
+        },
+        2 => match r {
+            0 => open(AppId::Files),
+            1 => open(AppId::Terminal),
+            2 => open(AppId::Paint),
+            3 => open(AppId::Browser),
+            5 => unsafe {
+                if N > 0 {
+                    close(N - 1);
+                }
+            },
+            _ => {}
+        },
+        3 => {
+            gui::set_theme(r);
+            gui::bg_regen();
+        }
+        4 => unsafe { raise(r); },
+        5 => {
+            open(AppId::Browser);
+            apps::show_manual(); // after open: on_open resets the page
+        }
+        _ => {}
+    }
+}
+
+/// panel geometry of menu m: (x, y, width, rows)
+fn menu_panel(m: i32) -> (i32, i32, i32, usize) {
+    let n = menu_len(m);
+    let mut w = 0i32;
+    for r in 0..n {
+        if let Some(s) = menu_label(m, r) {
+            let tw = gui::text_w(s, 2);
+            if tw > w {
+                w = tw;
+            }
+        }
+    }
+    w += 56; // check column + right padding
+    if w < 150 {
+        w = 150;
+    }
+    let (tx, _) = menu_rect(m);
+    (tx - 6, 30, w, n)
+}
+
+/// which menu title sits under the bar point (cx, cy)? -1 = none
+fn menu_at(cx: i32, cy: i32) -> i32 {
+    if cy > 28 {
+        return -1;
+    }
+    for m in 0..MENU_N {
+        let (x0, x1) = menu_rect(m);
+        if cx >= x0 - 6 && cx < x1 + 6 {
+            return m;
+        }
+    }
+    -1
+}
+
+/// live hover while a menu is open: switch titles, track the item row
+fn menu_hover(cx: i32, cy: i32) {
+    unsafe {
+        let m = MENU_OPEN;
+        if m < 0 {
+            return;
+        }
+        // hovering the bar switches menus (macOS behavior)
+        let hit = menu_at(cx, cy);
+        if hit >= 0 {
+            if hit != m && menu_len(hit) > 0 {
+                MENU_OPEN = hit;
+                MENU_HOVER = -1;
+                DIRTY = true;
+            }
+            return;
+        }
+        // hovering the panel highlights an item row
+        let (px, py, pw, n) = menu_panel(m);
+        let mut row = -1i32;
+        if n > 0 && cx >= px && cx < px + pw && cy >= py && cy < py + n as i32 * 20 + 8 {
+            let r = (cy - (py + 1)) / 20;
+            if r >= 0 && r < n as i32 && menu_label(m, r as usize).is_some() {
+                row = r;
+            }
+        }
+        if row != MENU_HOVER {
+            MENU_HOVER = row;
+            DIRTY = true;
+        }
+    }
+}
+
+/// draw the open menu: highlighted title, dropdown panel, items
+fn draw_menu(m: i32) {
+    unsafe {
+        let n = menu_len(m);
+        if n == 0 {
+            return;
+        }
+        // highlighted title in the bar
+        let (tx0, tx1) = menu_rect(m);
+        gui::round_rect_fill(tx0 - 6, 2, tx1 - tx0 + 12, 24, 6, ACCENT);
+        if m == 0 {
+            gui::draw_monogram();
+        } else {
+            gui::draw_text(tx0, 7, menu_title(m), 2, 0xFFFFFFFF);
+        }
+        // dropdown: shadow + panel
+        let (px, py, pw, _) = menu_panel(m);
+        let ph = n as i32 * 20 + 8;
+        gui::round_rect_blend(px - 8, py, pw + 16, ph + 12, 14, 0x000000, 120);
+        gui::round_rect_fill(px, py, pw, ph, 10, 0xFF1F1F26);
+        gui::blend_rect(px + 3, py + 1, pw - 6, 1, 0xFFFFFF, 26);
+        for r in 0..n {
+            let iy = py + 3 + r as i32 * 20;
+            match menu_label(m, r) {
+                None => {
+                    gui::blend_rect(px + 8, iy + 6, pw - 16, 1, 0xFFFFFF, 30);
+                }
+                Some(s) => {
+                    let hov = MENU_HOVER == r as i32;
+                    if hov {
+                        gui::round_rect_fill(px + 5, iy - 2, pw - 10, 18, 5, ACCENT);
+                    }
+                    let col = if hov { 0xFFFFFFFF } else { 0xFFE8E8EC };
+                    gui::draw_text(px + 26, iy, s, 2, col);
+                    if menu_checked(m, r) {
+                        // check mark: two short strokes
+                        gui::draw_line_t(px + 10, iy + 5, px + 13, iy + 8, 2, col);
+                        gui::draw_line_t(px + 13, iy + 8, px + 19, iy + 1, 2, col);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // left mouse button went down at (cx, cy)
 fn press(cx: i32, cy: i32) {
     unsafe {
-        // monogram in the menubar opens About
-        if cx >= 6 && cx <= 30 && cy >= 4 && cy <= 26 {
-            open(AppId::About);
+        // ---- menubar menus first ----
+        if MENU_OPEN >= 0 {
+            let m = MENU_OPEN;
+            // click on the open panel: run the item (separators do nothing)
+            let (px, py, pw, n) = menu_panel(m);
+            if n > 0 && cx >= px && cx < px + pw && cy >= py && cy < py + n as i32 * 20 + 8 {
+                let r = (cy - (py + 1)) / 20;
+                if r >= 0 && r < n as i32 && menu_label(m, r as usize).is_some() {
+                    MENU_OPEN = -1;
+                    MENU_HOVER = -1;
+                    DIRTY = true;
+                    run_item(m, r as usize);
+                }
+                return;
+            }
+            // click on another title switches, on the same title toggles closed,
+            // anywhere else closes and swallows the click (macOS behavior)
+            let hit = menu_at(cx, cy);
+            MENU_OPEN = if hit >= 0 && hit != m && menu_len(hit) > 0 {
+                hit
+            } else {
+                -1
+            };
+            MENU_HOVER = -1;
+            DIRTY = true;
+            return;
+        }
+        let hit = menu_at(cx, cy);
+        if hit >= 0 {
+            if menu_len(hit) > 0 {
+                MENU_OPEN = hit;
+                MENU_HOVER = -1;
+            }
+            DIRTY = true;
             return;
         }
         // windows front to back
@@ -299,6 +594,10 @@ pub fn on_mouse() {
         gui::set_cursor(cx, cy);
 
         let held = ev.btn & 1 != 0;
+        if !held {
+            // menus are open: live title switching + item highlighting
+            menu_hover(cx, cy);
+        }
         if ev.click {
             press(cx, cy);
         } else if held {
@@ -334,6 +633,13 @@ pub fn on_mouse() {
 pub fn on_key() {
     while let Some(code) = pop_key() {
         unsafe {
+            // any key press closes an open menu first
+            if MENU_OPEN >= 0 {
+                MENU_OPEN = -1;
+                MENU_HOVER = -1;
+                DIRTY = true;
+                continue;
+            }
             if N == 0 {
                 continue;
             }
@@ -373,6 +679,16 @@ fn draw_window(focused: bool, w: Win) {
     gui::clear_clip();
 }
 
+/// draw the static menubar titles over the background bar
+fn draw_menu_titles() {
+    gui::draw_text(38, 7, app_menu_name(), 2, 0xFFE8E8EC);
+    let mut x = 38 + gui::text_w(app_menu_name(), 2) + 18;
+    for t in MENU_TITLES {
+        gui::draw_text(x, 7, t, 2, 0xFFC8C8D0);
+        x += gui::text_w(t, 2) + 18;
+    }
+}
+
 /// full-screen compositor pass: desktop background, windows back to front, cursor
 pub fn redraw() {
     unsafe {
@@ -381,6 +697,12 @@ pub fn redraw() {
             if let Some(w) = WINS[i] {
                 draw_window(i == N - 1, w);
             }
+        }
+        // macOS-style menubar titles live over the background bar
+        draw_menu_titles();
+        // menus draw above every window; the cursor stays on top
+        if MENU_OPEN >= 0 {
+            draw_menu(MENU_OPEN);
         }
         gui::clear_clip();
         gui::draw_cursor();

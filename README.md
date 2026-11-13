@@ -14,7 +14,7 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 ├── kernel/
 │   ├── main.rs               # kernel entry (kmain, .bss zeroing, event loop)
 │   ├── gui.rs                # GUI: draw targets, clipping, themes, text, dock, cursor
-│   ├── wm.rs                 # window manager + compositor (drag, focus, queues)
+│   ├── wm.rs                 # window manager + compositor (drag, focus, queues, menubar menus)
 │   ├── apps.rs               # bundled apps: files, terminal, calc, paint, settings, browser
 │   ├── font.rs               # 4x7 clock digits + 5x7 ASCII font (95 glyphs)
 │   ├── gdt.rs                # own GDT (ring-0 code/data) + CS/SS reload
@@ -47,6 +47,7 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 │   ├── debug-m4.sh           # short M4 debug run (strokes, drag, keys)
 │   ├── debug-ahci.sh         # short AHCI trace run (QEMU trace:ahci* debugging)
 │   ├── debug-net.sh          # short network debug run (QEMU filter-dump pcap analysis)
+│   ├── debug-menu.sh         # menubar menu acceptance run: every dropdown, theme pick, window list
 │   ├── run-test.sh           # Windows wrapper for run-qemu.sh
 │   ├── start-os.sh/.ps1      # boot the OS live in a QEMU window (fallback)
 │   ├── start-os-vnc.sh       # headless QEMU serving VNC on 127.0.0.1:5901
@@ -67,8 +68,8 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 | **GUI** `kernel/gui.rs` | Draw targets (framebuffer / 2048x2048 background buffer / app canvas) with clipping, 4 themes (AURORA/SUNSET/OCEAN/FOREST) with bilinear gradients, alpha blending, rounded rects (scanline + `isqrt`), Bresenham brush lines, SDF strokes, menubar (monogram/wifi/battery/clock), dock with 6 app icons, 5x7 ASCII bitmap font (`font.rs`), pre-rendered background blitted in u64 bulk, arrow cursor drawn last (no save/restore) |
 | **Interrupts (M2)** | `gdt.rs` own GDT with far-return CS reload, `idt.rs` 32 exception stubs (global_asm, own register save) + IRQ0/1/12 dispatcher (IRQ1/12 push events into the WM queues), `pic.rs` 8259A remap to 32..47, `pit.rs` timer @ 1000 Hz |
 | **Input + memory (M3)** | `ps2.rs` 8042 init (translation off, scancode set 2, timeouts), `keyboard.rs` keymap + shift map + 20 ms make-code debounce, `mouse.rs` 3-byte packet parser (`Option` events only on completed packets), `pmm.rs` bitmap frame allocator fed by the UEFI memory map from the bootloader |
-| **Window manager (M4)** `wm.rs` | Window list with z-order by index (max 8), ring-buffer input queues (IRQ producer / main-loop consumer), raise on click, title-bar drag, red traffic light closes, dock launches apps, content clicks/moves/keys routed to the focused app, compositor pass: background -> windows (shadow, chrome, clipped content) -> cursor |
-| **Apps (M4)** `apps.rs` | Files (backed by ASPFS on disk: tabs + file list + detail pane loaded from disk), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about + disk commands ls/cat/write/rm/df + network commands ip/ping), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About (via the menubar monogram) |
+| **Window manager (M4)** `wm.rs` | Window list with z-order by index (max 8), ring-buffer input queues (IRQ producer / main-loop consumer), raise on click, title-bar drag, red traffic light closes, dock launches apps, content clicks/moves/keys routed to the focused app, macOS-style menubar menus (monogram/app/FILE/VIEW/WINDOW/HELP dropdowns with live hover switching, item highlighting, checkmarks, outside-click close, any key closes), compositor pass: background -> windows (shadow, chrome, clipped content) -> menus -> cursor |
+| **Apps (M4)** `apps.rs` | Files (backed by ASPFS on disk: tabs + file list + detail pane loaded from disk), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about + disk commands ls/cat/write/rm/df + network commands ip/ping), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About + Settings (via the monogram menu, manual page also via the HELP menu) |
 | **Disk (M5)** `pci.rs`/`ahci.rs` | Own PCI config-space scan (ports 0xCF8/0xCFC): finds the AHCI controller (class 0106), enables memory space + bus mastering, hands BAR5 to the driver. `ahci.rs`: HBA init (GHC.AE), first port with DET=3, command list + FIS receive + command table in frames from our own PMM, READ/WRITE DMA EXT (LBA48) with polling (no interrupts), DMA staging buffer in `.bss` |
 | **File system (M5)** `fs.rs` | **ASPFS**, the own format: 4 KiB blocks, block 0 superblock (magic `ASPFS`), block bitmap (cached in memory), chained directory blocks with 128-byte entries (kind/name/start/count/size), files as contiguous extents. Mount/list/read/write/delete/free, all writes go back to disk through the AHCI driver — files survive reboots |
 | **mkfs (M5)** `tools/mkfs.rs` | Host tool (plain Rust, no deps): formats `build/aspect-data.img` (16 MiB) with the ASPFS layout and the seed files (SYSTEM/USERS/GUEST folders); wired into `make all` |
@@ -125,6 +126,7 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1" -Window
 - [x] **M4** Window compositor + apps: drag/focus/close, file manager, terminal, calculator, paint, settings (themes), offline browser, about
 - [x] **M5** Real file system: own PCI scan, own AHCI driver, own ASPFS format + mkfs tool; Files app and terminal read/write real, reboot-persistent files
 - [x] **M6** Network stack (QEMU): own PCI NIC discovery, own e1000 driver, own ARP/IPv4/ICMP stack, `IP`/`PING` terminal commands; real hardware next (USB stick)
+- [x] **M7** macOS-style menubar menus: monogram/app/FILE/VIEW/WINDOW/HELP dropdowns, live hover switching, theme picker with checkmarks, window list
 
 ## License
 

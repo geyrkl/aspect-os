@@ -474,15 +474,20 @@ pub fn draw_gradient() {
     }
 }
 
+/// the stylized "A" monogram in the menubar (drawn again over menu highlights)
+pub fn draw_monogram() {
+    draw_line_t(14, 21, 18, 7, 2, 0xFFB9A8F5);
+    draw_line_t(18, 7, 22, 21, 2, 0xFFF5A8E8);
+    draw_line_t(16, 15, 20, 15, 2, 0xFFFFFFFF);
+}
+
 pub fn draw_menubar() {
     let w = tw();
     blend_rect(0, 0, w, 28, 0x0A0A0C, 150);
     blend_rect(0, 27, w, 1, 0xFFFFFF, 30);
 
-    // monogram on the left: stylized "A" (also the About "menu")
-    draw_line_t(14, 21, 18, 7, 2, 0xFFB9A8F5);
-    draw_line_t(18, 7, 22, 21, 2, 0xFFF5A8E8);
-    draw_line_t(16, 15, 20, 15, 2, 0xFFFFFFFF);
+    // monogram on the left: stylized "A" (the app menu)
+    draw_monogram();
 
     // right side: wifi + battery
     let wx = w - 96;
