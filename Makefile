@@ -14,9 +14,10 @@ KERNEL_SRCS := kernel/main.rs kernel/gui.rs kernel/logo.rs kernel/wm.rs \
                kernel/gdt.rs kernel/idt.rs kernel/io.rs \
                kernel/pic.rs kernel/pit.rs \
                kernel/ps2.rs kernel/keyboard.rs kernel/mouse.rs \
+               kernel/pci.rs kernel/ahci.rs kernel/fs.rs \
                kernel/pmm.rs kernel/kernel.ld
 
-all: $(BUILDDIR)/aspect-os.iso
+all: $(BUILDDIR)/aspect-os.iso $(BUILDDIR)/aspect-data.img
 
 # --- kernel: freestanding 64-bit ELF, then flat binary ---
 $(BUILDDIR)/kernel.elf: $(KERNEL_SRCS) | $(BUILDDIR)
@@ -38,6 +39,13 @@ $(BUILDDIR)/BOOTX64.EFI: boot/main.rs $(BUILDDIR)/kernel.bin | $(BUILDDIR)
 # --- bootable ISO (UEFI El Torito, FAT image via mtools) ---
 $(BUILDDIR)/aspect-os.iso: $(BUILDDIR)/BOOTX64.EFI
 	bash scripts/build-iso.sh
+
+# --- data disk: mkfs (host Rust) -> build/aspect-data.img ---
+$(BUILDDIR)/mkfs: tools/mkfs.rs | $(BUILDDIR)
+	$(RUSTC) --edition 2021 -O tools/mkfs.rs -o $@
+
+$(BUILDDIR)/aspect-data.img: $(BUILDDIR)/mkfs
+	$(BUILDDIR)/mkfs $@ 16
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)

@@ -25,17 +25,24 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 │   ├── keyboard.rs           # scancode set 2 -> key codes (shift map, debounce)
 │   ├── mouse.rs              # 3-byte packets -> cursor deltas + buttons
 │   ├── pmm.rs                # bitmap physical memory allocator (4 KiB frames)
-│   ├── io.rs                 # port I/O (outb/inb)
+│   ├── pci.rs                # own PCI config-space scan (finds AHCI, BAR5)
+│   ├── ahci.rs               # own AHCI driver (DMA EXT read/write, polling)
+│   ├── fs.rs                 # ASPFS: own file system (superblock/bitmap/dirs)
+│   ├── io.rs                 # port I/O (outb/inb/outl/inl)
 │   ├── logo.rs               # "ASPECT OS" wordmark as vector strokes
 │   ├── serial.rs             # COM1 debug output
 │   ├── bootinfo.rs           # shared structure bootloader -> kernel
 │   └── kernel.ld             # linker script (kernel @ 0x2000000, .text.first)
+├── tools/
+│   └── mkfs.rs               # host tool: creates the ASPFS data disk image
 ├── scripts/
 │   ├── build.sh              # WSL build entry point (toolchain check + make)
 │   ├── build-iso.sh          # FAT ESP (mtools) + UEFI El-Torito ISO (xorriso)
 │   ├── run-qemu.sh           # QEMU/OVMF test, screendumps via QMP
 │   ├── run-m4.sh             # M4 acceptance run: apps, drag, keys, themes, browser
+│   ├── run-m5.sh             # M5 acceptance run: real FS, terminal disk access, reboot persistence
 │   ├── debug-m4.sh           # short M4 debug run (strokes, drag, keys)
+│   ├── debug-ahci.sh         # short AHCI trace run (QEMU trace:ahci* debugging)
 │   ├── run-test.sh           # Windows wrapper for run-qemu.sh
 │   ├── start-os.sh/.ps1      # boot the OS live in a QEMU window (fallback)
 │   ├── start-os-vnc.sh       # headless QEMU serving VNC on 127.0.0.1:5901
@@ -57,7 +64,10 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 | **Interrupts (M2)** | `gdt.rs` own GDT with far-return CS reload, `idt.rs` 32 exception stubs (global_asm, own register save) + IRQ0/1/12 dispatcher (IRQ1/12 push events into the WM queues), `pic.rs` 8259A remap to 32..47, `pit.rs` timer @ 1000 Hz |
 | **Input + memory (M3)** | `ps2.rs` 8042 init (translation off, scancode set 2, timeouts), `keyboard.rs` keymap + shift map + 20 ms make-code debounce, `mouse.rs` 3-byte packet parser (`Option` events only on completed packets), `pmm.rs` bitmap frame allocator fed by the UEFI memory map from the bootloader |
 | **Window manager (M4)** `wm.rs` | Window list with z-order by index (max 8), ring-buffer input queues (IRQ producer / main-loop consumer), raise on click, title-bar drag, red traffic light closes, dock launches apps, content clicks/moves/keys routed to the focused app, compositor pass: background -> windows (shadow, chrome, clipped content) -> cursor |
-| **Apps (M4)** `apps.rs` | Files (static VFS: 3 folders x 3 text files, tabs + detail pane), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About (via the menubar monogram) |
+| **Apps (M4)** `apps.rs` | Files (backed by ASPFS on disk: tabs + file list + detail pane loaded from disk), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about + disk commands ls/cat/write/rm/df), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About (via the menubar monogram) |
+| **Disk (M5)** `pci.rs`/`ahci.rs` | Own PCI config-space scan (ports 0xCF8/0xCFC): finds the AHCI controller (class 0106), enables memory space + bus mastering, hands BAR5 to the driver. `ahci.rs`: HBA init (GHC.AE), first port with DET=3, command list + FIS receive + command table in frames from our own PMM, READ/WRITE DMA EXT (LBA48) with polling (no interrupts), DMA staging buffer in `.bss` |
+| **File system (M5)** `fs.rs` | **ASPFS**, the own format: 4 KiB blocks, block 0 superblock (magic `ASPFS`), block bitmap (cached in memory), chained directory blocks with 128-byte entries (kind/name/start/count/size), files as contiguous extents. Mount/list/read/write/delete/free, all writes go back to disk through the AHCI driver — files survive reboots |
+| **mkfs (M5)** `tools/mkfs.rs` | Host tool (plain Rust, no deps): formats `build/aspect-data.img` (16 MiB) with the ASPFS layout and the seed files (SYSTEM/USERS/GUEST folders); wired into `make all` |
 | **Build** | `rustc --target x86_64-unknown-uefi` -> `BOOTX64.EFI` (rust-lld); `rustc --target x86_64-unknown-none` -> ELF -> `objcopy` -> flat binary; ISO via mtools + xorriso |
 
 ## Build & Test (WSL Ubuntu-24.04)
@@ -83,6 +93,8 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1"
 
 - The ISO is rebuilt automatically when sources are newer (skip with `-NoBuild`).
 - QEMU runs **headless inside WSL** and serves VNC on `127.0.0.1:5901`.
+- A real data disk (`build/aspect-data.img`, ASPFS, built by `make all`) is
+  attached via QEMU's ich9-ahci — files created in the OS survive reboots.
 - The viewer is our own RFB client (`scripts\vnc-viewer.ps1`, C# via
   `Add-Type`, no external dependencies): a scaled window showing the guest
   framebuffer. Mouse and keyboard work reliably there, because VNC pointer
@@ -103,7 +115,7 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1" -Window
 - [x] **M2** Own GDT/IDT, exception handlers, PIT timer -> clock in the menubar
 - [x] **M3** Own drivers: PS/2 mouse + keyboard, own physical allocator
 - [x] **M4** Window compositor + apps: drag/focus/close, file manager, terminal, calculator, paint, settings (themes), offline browser, about
-- [ ] **M5** Real file system (ATA/AHCI + own FS format)
+- [x] **M5** Real file system: own PCI scan, own AHCI driver, own ASPFS format + mkfs tool; Files app and terminal read/write real, reboot-persistent files
 - [ ] **M6** Network stack, then real hardware (USB stick)
 
 ## License

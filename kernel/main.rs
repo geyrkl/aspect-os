@@ -13,8 +13,10 @@ fn panic(_i: &PanicInfo) -> ! {
 }
 
 pub mod apps;
+pub mod ahci;
 pub mod bootinfo;
 pub mod font;
+pub mod fs;
 pub mod gdt;
 pub mod gui;
 pub mod idt;
@@ -22,6 +24,7 @@ pub mod io;
 pub mod keyboard;
 pub mod logo;
 pub mod mouse;
+pub mod pci;
 pub mod pic;
 pub mod pit;
 pub mod pmm;
@@ -118,6 +121,16 @@ fn kernel_main(bi: *const BootInfo) {
     }
     unsafe { pmm::init(&regs[..n], 0x2000000, bi_ref.kernel_size) };
     serial::log("pmm ready\n");
+
+    // --- M5: real file system (own PCI scan + AHCI driver + ASPFS) ---
+    serial::log("M5: pci scan\n");
+    unsafe { pci::init() };
+    serial::log("M5: ahci init\n");
+    unsafe { ahci::init(pci::bar()) };
+    serial::log("M5: fs mount\n");
+    unsafe { fs::mount() };
+    apps::fs_populate();
+    serial::log("fs lists ready\n");
 
     gui::init_cursor();
     serial::log("M4: compositor running, interrupts enabled\n");

@@ -20,6 +20,9 @@ qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$CODE" \
   -drive if=pflash,format=raw,file="$OUT/VARS.fd" \
   -drive file=build/aspect-os.iso,media=cdrom,readonly=on \
+  -device ich9-ahci,id=ahci0 \
+  -drive file=build/aspect-data.img,format=raw,if=none,id=aspfs \
+  -device ide-hd,drive=aspfs,bus=ahci0.0 \
   -serial file:"$OUT/serial.log" \
   -display none \
   -qmp unix:"$OUT/qmp.sock",server,nowait \

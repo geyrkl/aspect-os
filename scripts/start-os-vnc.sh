@@ -16,6 +16,9 @@ qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$CODE" \
   -drive if=pflash,format=raw,file="$VARS" \
   -drive file="/mnt/c/Klemens/Coding/Aspect OS/build/aspect-os.iso",media=cdrom,readonly=on \
+  -device ich9-ahci,id=ahci0 \
+  -drive file="/mnt/c/Klemens/Coding/Aspect OS/build/aspect-data.img",format=raw,if=none,id=aspfs \
+  -device ide-hd,drive=aspfs,bus=ahci0.0 \
   -display none \
   -vnc 127.0.0.1:1 \
   -pidfile /tmp/aspect-os.pid \

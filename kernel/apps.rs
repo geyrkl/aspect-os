@@ -124,74 +124,124 @@ fn num_into(buf: &mut [u8], len: &mut usize, v: u64) {
 }
 
 // =====================================================================
-// FILE MANAGER - static virtual file system (folders + text files)
+// FILE MANAGER - backed by ASPFS on disk (real files, real folders)
 // =====================================================================
+
+const F_MAXD: usize = 3; // folder tabs (root subdirectories)
+const F_MAXF: usize = 8; // files shown per folder
 
 static mut F_FOLDER: usize = 0;
 static mut F_SEL: i32 = -1;
+static mut F_POP: bool = false; // file lists filled from disk
+static mut F_DIR: [[u8; 64]; F_MAXD] = [[0; 64]; F_MAXD];
+static mut F_FILES: [[[u8; 64]; F_MAXF]; F_MAXD] = [[[0; 64]; F_MAXF]; F_MAXD];
+static mut F_COUNT: [usize; F_MAXD] = [0; F_MAXD];
+static mut F_TEXT: [u8; 2048] = [0; 2048]; // content of the selected file
+static mut F_TLEN: usize = 0;
+static mut F_SRC: i32 = -1; // folder * F_MAXF + sel of loaded text
 
-const FOLDERS: [&str; 3] = ["SYSTEM", "USERS", "GUEST"];
-const F_NAMES: [[&str; 3]; 3] = [
-    ["WELCOME.TXT", "ASPECT.SYS", "ROADMAP.TXT"],
-    ["KLEMENS.TXT", "NOTES.TXT", "PROJECTS.TXT"],
-    ["GUEST.LOG", "TEMP.TXT", "README.TXT"],
-];
-const F_TEXT: [[&str; 3]; 3] = [
-    [
-        "WELCOME TO ASPECT OS\n\nTHIS SYSTEM IS BUILT\nFROM SCRATCH IN RUST:\nOWN BOOTLOADER, OWN\n64-BIT KERNEL, OWN\nGUI AND APPS.",
-        "ASPECT.SYS CORE\n\nKERNEL: RUST, NO STD\nPMM: BITMAP ALLOCATOR\nINPUT: PS/2 KEYBOARD\nAND MOUSE, OWN DRIVERS\nVIDEO: GOP FRAMEBUFFER",
-        "ROADMAP\n\nM1 BOOT + VIDEO OK\nM2 INTERRUPTS OK\nM3 INPUT + PMM OK\nM4 WINDOWS + APPS\nM5 REAL FILE SYSTEM\nM6 NETWORK STACK",
-    ],
-    [
-        "HOME FOLDER\n\nTHIS IS THE USER\nFOLDER OF THE ONLY\nUSER OF THIS MACHINE.",
-        "NOTES\n\nREMEMBER: NO GRUB,\nNO GNU EFI, NO LINUX.\nEVERYTHING OURS.",
-        "PROJECTS\n\n1. WINDOW COMPOSITOR\n2. PAINT APP\n3. OFFLINE BROWSER\n4. REAL FILE SYSTEM",
-    ],
-    [
-        "GUEST SESSION LOG\n\nLOGIN AT BOOT TIME\nNO FILES MODIFIED",
-        "TEMP.TXT\n\nTHIS FILE IS SAFE\nTO DELETE. THE VFS\nIS IN MEMORY ONLY.",
-        "README.TXT\n\nTHE GUEST FOLDER IS\nFOR VISITORS AND\nTEST DOCUMENTS.",
-    ],
-];
+/// fill the folder/file lists from the mounted file system
+pub fn fs_populate() {
+    unsafe {
+        F_POP = false;
+        F_SEL = -1;
+        F_SRC = -1;
+        F_TLEN = 0;
+        if !crate::fs::ready() {
+            return;
+        }
+        for d in 0..F_MAXD {
+            if d >= crate::fs::dir_count() {
+                break;
+            }
+            let mut name = [0u8; 64];
+            let n = crate::fs::dir_name(d, &mut name);
+            F_DIR[d] = [0u8; 64];
+            F_DIR[d][..n].copy_from_slice(&name[..n]);
+            F_COUNT[d] = crate::fs::list_dir(d, &mut F_FILES[d], F_MAXF);
+        }
+        F_POP = true;
+    }
+}
+
+/// length of a zero-terminated name buffer
+fn nlen(b: &[u8]) -> usize {
+    let mut n = 0usize;
+    while n < b.len() && b[n] != 0 {
+        n += 1;
+    }
+    n
+}
+
+/// draw a byte buffer as ascii
+fn draw_name(x: i32, y: i32, b: &[u8], sc: i32, c: u32) {
+    let n = nlen(b);
+    gui::draw_text_b(x, y, &b[..n], sc, c);
+}
+
+/// multi-line byte content (splits on \n, wraps long lines)
+fn draw_multiline_b(x: i32, y: i32, b: &[u8], sc: i32, c: u32, max_w: i32) -> i32 {
+    let mut ry = y;
+    let mut start = 0usize;
+    for i in 0..=b.len() {
+        if i == b.len() || b[i] == b'\n' {
+            ry += draw_wrap(x, ry, &b[start..i], sc, c, max_w) * (8 * sc);
+            start = i + 1;
+        }
+    }
+    ry
+}
 
 fn files_draw(x: i32, y: i32, w: i32, h: i32) {
     gui::fill_rect(x, y, w, h, 0xFF202028);
-    // folder tabs
-    for f in 0..FOLDERS.len() {
-        let bx = x + 8 + f as i32 * 104;
-        let sel = unsafe { F_FOLDER } == f;
-        gui::fill_rect(bx, y + 8, 96, 26, if sel { 0xFF3E3E4A } else { 0xFF2A2A34 });
-        let name = FOLDERS[f];
-        let tw = gui::text_w(name, 2);
-        gui::draw_text(bx + (96 - tw) / 2, y + 15, name, 2, if sel { 0xFFFFFFFF } else { 0xFF9A9AA6 });
-    }
-    // file list (left pane)
-    gui::fill_rect(x + 8, y + 44, 168, h - 52, 0xFF1A1A20);
-    let folder = unsafe { F_FOLDER };
-    for i in 0..F_NAMES[folder].len() {
-        let ry = y + 50 + i as i32 * 26;
-        let sel = unsafe { F_SEL } == i as i32;
-        if sel {
-            gui::fill_rect(x + 12, ry - 3, 160, 22, 0xFF3E5E8E);
+    unsafe {
+        if !F_POP || !crate::fs::ready() {
+            gui::draw_text(x + 12, y + 60, "NO DISK - FILE SYSTEM", 2, 0xFF8A8A96);
+            gui::draw_text(x + 12, y + 78, "NOT MOUNTED", 2, 0xFF8A8A96);
+            return;
         }
-        gui::draw_text(x + 18, ry, F_NAMES[folder][i], 2, if sel { 0xFFFFFFFF } else { 0xFFB0B0BC });
-    }
-    // divider
-    gui::fill_rect(x + 184, y + 44, 2, h - 52, 0xFF33333E);
-    // detail pane (right)
-    let dx = x + 196;
-    let dw = x + w - dx - 8;
-    let mut sy = y + 50;
-    if unsafe { F_SEL } < 0 {
-        gui::draw_text(dx, sy, "SELECT A FILE", 2, 0xFF8A8A96);
-    } else {
-        let f = unsafe { F_SEL } as usize;
-        let name = F_NAMES[folder][f];
-        gui::draw_text(dx, sy, name, 2, 0xFFFFFFFF);
-        sy += 26;
-        gui::fill_rect(dx, sy, dw, 1, 0xFF33333E);
-        sy += 8;
-        draw_multiline(dx, sy, F_TEXT[folder][f], 1, 0xFFC0C0CA, dw);
+        // folder tabs
+        for f in 0..F_MAXD {
+            let bx = x + 8 + f as i32 * 104;
+            let sel = F_FOLDER == f;
+            gui::fill_rect(bx, y + 8, 96, 26, if sel { 0xFF3E3E4A } else { 0xFF2A2A34 });
+            let tw = gui::text_w_b(&F_DIR[f], 2);
+            gui::draw_text_b(bx + (96 - tw) / 2, y + 15, &F_DIR[f], 2, if sel { 0xFFFFFFFF } else { 0xFF9A9AA6 });
+        }
+        // file list (left pane)
+        gui::fill_rect(x + 8, y + 44, 168, h - 52, 0xFF1A1A20);
+        let folder = F_FOLDER;
+        for i in 0..F_COUNT[folder] {
+            let ry = y + 50 + i as i32 * 26;
+            let sel = F_SEL == i as i32;
+            if sel {
+                gui::fill_rect(x + 12, ry - 3, 160, 22, 0xFF3E5E8E);
+            }
+            draw_name(x + 18, ry, &F_FILES[folder][i], 2, if sel { 0xFFFFFFFF } else { 0xFFB0B0BC });
+        }
+        // divider
+        gui::fill_rect(x + 184, y + 44, 2, h - 52, 0xFF33333E);
+        // detail pane (right)
+        let dx = x + 196;
+        let dw = x + w - dx - 8;
+        let mut sy = y + 50;
+        if F_SEL < 0 {
+            gui::draw_text(dx, sy, "SELECT A FILE", 2, 0xFF8A8A96);
+        } else {
+            let f = F_SEL as usize;
+            if f >= F_COUNT[folder] {
+                return;
+            }
+            draw_name(dx, sy, &F_FILES[folder][f], 2, 0xFFFFFFFF);
+            sy += 26;
+            gui::fill_rect(dx, sy, dw, 1, 0xFF33333E);
+            sy += 8;
+            if F_SRC == (folder * F_MAXF + f) as i32 {
+                draw_multiline_b(dx, sy, &F_TEXT[..F_TLEN], 1, 0xFFC0C0CA, dw);
+            } else {
+                gui::draw_text(dx, sy, "...", 2, 0xFF8A8A96);
+            }
+        }
     }
 }
 
@@ -199,7 +249,7 @@ fn files_click(lx: i32, ly: i32) {
     unsafe {
         // folder tabs
         if ly >= 8 && ly < 34 {
-            for f in 0..FOLDERS.len() {
+            for f in 0..F_MAXD {
                 let bx = 8 + f as i32 * 104;
                 if lx >= bx && lx < bx + 96 {
                     F_FOLDER = f;
@@ -208,11 +258,18 @@ fn files_click(lx: i32, ly: i32) {
                 }
             }
         }
-        // file rows
+        // file rows: selecting loads the content from disk
         if lx >= 8 && lx < 176 && ly >= 44 {
             let row = (ly - 44 - 6) / 26;
-            if row >= 0 && row < F_NAMES[F_FOLDER].len() as i32 {
+            if row >= 0 && (row as usize) < F_COUNT[F_FOLDER] {
                 F_SEL = row;
+                let f = row as usize;
+                let mut name = [0u8; 64];
+                let n = nlen(&F_FILES[F_FOLDER][f]);
+                name[..n].copy_from_slice(&F_FILES[F_FOLDER][f][..n]);
+                let got = crate::fs::read_file(F_FOLDER, &name[..n], &mut F_TEXT);
+                F_TLEN = got;
+                F_SRC = (F_FOLDER * F_MAXF + f) as i32;
             }
         }
     }
@@ -237,6 +294,7 @@ static mut T_BUF: [[u8; T_COLS]; T_ROWS] = [[0; T_COLS]; T_ROWS];
 static mut T_IN: [u8; 30] = [0; 30];
 static mut T_IN_LEN: usize = 0;
 static mut T_USED: usize = 0; // rows filled (scrolls when full)
+static mut CATB: [u8; 2048] = [0; 2048]; // CAT file content staging
 
 fn term_clear() {
     unsafe {
@@ -311,12 +369,13 @@ fn term_exec(cmd: &[u8]) {
         term_push_str("COMMANDS:");
         term_push_str("HELP CLEAR ECHO VER");
         term_push_str("UPTIME MEM APPS ABOUT");
+        term_push_str("LS CAT WRITE RM DF");
     } else if eq("CLEAR") {
         term_clear();
     } else if eq("ECHO") {
         term_push(rest);
     } else if eq("VER") {
-        term_push_str("ASPECT OS 0.4.0 M4");
+        term_push_str("ASPECT OS 0.5.0 M5");
     } else if eq("UPTIME") {
         term_push_num("UP ", pit::ticks() / 1000, " SECONDS");
     } else if eq("MEM") {
@@ -326,10 +385,251 @@ fn term_exec(cmd: &[u8]) {
     } else if eq("ABOUT") {
         term_push_str("ASPECT OS - OWN RUST OS");
         term_push_str("BOOTLOADER KERNEL GUI APPS");
+    } else if eq("DF") {
+        if crate::fs::ready() {
+            term_push_num("DISK FREE: ", crate::fs::free_kb() as u64, " KB");
+        } else {
+            term_push_str("NO DISK");
+        }
+    } else if eq("LS") {
+        term_ls(rest);
+    } else if eq("CAT") {
+        term_cat(rest);
+    } else if eq("WRITE") {
+        term_write(rest);
+    } else if eq("RM") {
+        term_rm(rest);
     } else if ulen == 0 {
         // empty command: just a new prompt line
     } else {
         term_push(b"UNKNOWN COMMAND");
+    }
+}
+
+/// resolve a "DIR/NAME" path: uppercase compare against the root dirs;
+/// returns (dir_index, file_name_slice_end) or None
+fn term_path(arg: &[u8]) -> Option<(usize, usize)> {
+    // uppercase copy
+    let mut up = [0u8; 62];
+    for i in 0..arg.len().min(62) {
+        up[i] = arg[i].to_ascii_uppercase();
+    }
+    // split at '/'
+    let mut slash = arg.len();
+    for i in 0..arg.len() {
+        if arg[i] == b'/' || arg[i] == b'\\' {
+            slash = i;
+            break;
+        }
+    }
+    if slash == arg.len() {
+        return None;
+    }
+    let dirname = &up[..slash];
+    let filename = slash + 1; // index into `arg` (original case)
+    if filename >= arg.len() {
+        return None;
+    }
+    unsafe {
+        for d in 0..crate::fs::dir_count() {
+            let mut n = 0usize;
+            while n < 64 && F_DIR[d][n] != 0 {
+                n += 1;
+            }
+            if n == dirname.len() {
+                let mut ok = true;
+                for i in 0..n {
+                    if F_DIR[d][i].to_ascii_uppercase() != dirname[i] {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    return Some((d, filename));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// LS [DIR] - list files (empty arg: summary of all folders)
+fn term_ls(arg: &[u8]) {
+    if !crate::fs::ready() {
+        term_push_str("NO DISK");
+        return;
+    }
+    if arg.is_empty() {
+        unsafe {
+            for d in 0..crate::fs::dir_count() {
+                let mut n = 0usize;
+                while n < 64 && F_DIR[d][n] != 0 {
+                    n += 1;
+                }
+                let mut line = [0u8; 38];
+                let mut L = 0;
+                for i in 0..n {
+                    if L < 38 {
+                        line[L] = F_DIR[d][i];
+                        L += 1;
+                    }
+                }
+                let suffix = format_count(F_COUNT[d]);
+                for &b in suffix {
+                    if L < 38 {
+                        line[L] = b;
+                        L += 1;
+                    }
+                }
+                term_push(&line[..L]);
+            }
+        }
+        return;
+    }
+    let mut up = [0u8; 62];
+    for i in 0..arg.len().min(62) {
+        up[i] = arg[i].to_ascii_uppercase();
+    }
+    let up = &up[..arg.len().min(62)];
+    unsafe {
+        for d in 0..crate::fs::dir_count() {
+            let n = nlen(&F_DIR[d]);
+            if n == up.len() && {
+                let mut ok = true;
+                for i in 0..n {
+                    if F_DIR[d][i] != up[i] {
+                        ok = false;
+                        break;
+                    }
+                }
+                ok
+            } {
+                if F_COUNT[d] == 0 {
+                    term_push_str("EMPTY FOLDER");
+                }
+                for i in 0..F_COUNT[d] {
+                    term_push(&F_FILES[d][i][..nlen(&F_FILES[d][i])]);
+                }
+                return;
+            }
+        }
+    }
+    term_push_str("NO SUCH FOLDER");
+}
+
+/// CAT DIR/NAME - print a file from disk
+fn term_cat(arg: &[u8]) {
+    if !crate::fs::ready() {
+        term_push_str("NO DISK");
+        return;
+    }
+    let p = term_path(arg);
+    if p.is_none() {
+        term_push_str("USAGE: CAT DIR/NAME");
+        return;
+    }
+    let (d, fs_) = p.unwrap();
+    // file name = arg[fs_..] up to the next space
+    let mut end = fs_;
+    while end < arg.len() && arg[end] != b' ' {
+        end += 1;
+    }
+    let name = &arg[fs_..end];
+    unsafe {
+        let got = crate::fs::read_file(d, name, &mut CATB);
+        if got == 0 {
+            term_push_str("NO SUCH FILE");
+            return;
+        }
+        let mut start = 0usize;
+        for i in 0..=got {
+            if i == got || CATB[i] == b'\n' {
+                // wrap long lines at the terminal width
+                let mut s = start;
+                while s < i {
+                    let n = (i - s).min(T_COLS);
+                    term_push(&CATB[s..s + n]);
+                    s += n;
+                }
+                start = i + 1;
+            }
+        }
+    }
+}
+
+/// WRITE DIR/NAME TEXT - create or overwrite a file on disk
+fn term_write(arg: &[u8]) {
+    if !crate::fs::ready() {
+        term_push_str("NO DISK");
+        return;
+    }
+    let p = term_path(arg);
+    if p.is_none() {
+        term_push_str("USAGE: WRITE DIR/NAME TEXT");
+        return;
+    }
+    let (d, fs_) = p.unwrap();
+    let mut end = fs_;
+    while end < arg.len() && arg[end] != b' ' {
+        end += 1;
+    }
+    if end == fs_ {
+        term_push_str("USAGE: WRITE DIR/NAME TEXT");
+        return;
+    }
+    let name = &arg[fs_..end];
+    let mut upname = [0u8; 62];
+    let nlen2 = name.len().min(62);
+    for i in 0..nlen2 {
+        upname[i] = name[i].to_ascii_uppercase();
+    }
+    let text = if end < arg.len() { &arg[end + 1..] } else { &arg[0..0] };
+    if crate::fs::write_file(d, &upname[..nlen2], text) {
+        term_push_str("FILE WRITTEN TO DISK");
+        // refresh the file manager lists so the new file appears
+        fs_populate();
+    } else {
+        term_push_str("WRITE FAILED");
+    }
+}
+
+/// RM DIR/NAME - delete a file from disk
+fn term_rm(arg: &[u8]) {
+    if !crate::fs::ready() {
+        term_push_str("NO DISK");
+        return;
+    }
+    let p = term_path(arg);
+    if p.is_none() {
+        term_push_str("USAGE: RM DIR/NAME");
+        return;
+    }
+    let (d, fs_) = p.unwrap();
+    let mut end = fs_;
+    while end < arg.len() && arg[end] != b' ' {
+        end += 1;
+    }
+    let name = &arg[fs_..end];
+    if crate::fs::delete_file(d, name) {
+        term_push_str("FILE DELETED");
+        fs_populate();
+    } else {
+        term_push_str("NO SUCH FILE");
+    }
+}
+
+/// suffix for the LS summary: " X FILES"
+fn format_count(n: usize) -> &'static [u8] {
+    match n {
+        0 => b": EMPTY",
+        1 => b": 1 FILE",
+        2 => b": 2 FILES",
+        3 => b": 3 FILES",
+        4 => b": 4 FILES",
+        5 => b": 5 FILES",
+        6 => b": 6 FILES",
+        7 => b": 7 FILES",
+        _ => b": 8 FILES",
     }
 }
 
