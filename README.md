@@ -48,6 +48,10 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 │   ├── debug-ahci.sh         # short AHCI trace run (QEMU trace:ahci* debugging)
 │   ├── debug-net.sh          # short network debug run (QEMU filter-dump pcap analysis)
 │   ├── debug-menu.sh         # menubar menu acceptance run: every dropdown, theme pick, window list
+│   ├── debug-motion.sh       # M8 acceptance run: dock animations, music EQ, notes persistence (reboot)
+│   ├── debug-bisect.sh       # short bisect run: input/write steps with dumps after each
+│   ├── debug-input.sh        # input diagnostics: QMP kbd vs HMP sendkey, click coordinates
+│   ├── debug-play.sh         # repro: music play with per-frame window-list trace
 │   ├── run-test.sh           # Windows wrapper for run-qemu.sh
 │   ├── start-os.sh/.ps1      # boot the OS live in a QEMU window (fallback)
 │   ├── start-os-vnc.sh       # headless QEMU serving VNC on 127.0.0.1:5901
@@ -69,7 +73,9 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 | **Interrupts (M2)** | `gdt.rs` own GDT with far-return CS reload, `idt.rs` 32 exception stubs (global_asm, own register save) + IRQ0/1/12 dispatcher (IRQ1/12 push events into the WM queues), `pic.rs` 8259A remap to 32..47, `pit.rs` timer @ 1000 Hz |
 | **Input + memory (M3)** | `ps2.rs` 8042 init (translation off, scancode set 2, timeouts), `keyboard.rs` keymap + shift map + 20 ms make-code debounce, `mouse.rs` 3-byte packet parser (`Option` events only on completed packets), `pmm.rs` bitmap frame allocator fed by the UEFI memory map from the bootloader |
 | **Window manager (M4)** `wm.rs` | Window list with z-order by index (max 8), ring-buffer input queues (IRQ producer / main-loop consumer), raise on click, title-bar drag, red traffic light closes, dock launches apps, content clicks/moves/keys routed to the focused app, macOS-style menubar menus (monogram/app/FILE/VIEW/WINDOW/HELP dropdowns with live hover switching, item highlighting, checkmarks, outside-click close, any key closes), compositor pass: background -> windows (shadow, chrome, clipped content) -> menus -> cursor |
-| **Apps (M4)** `apps.rs` | Files (backed by ASPFS on disk: tabs + file list + detail pane loaded from disk), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about + disk commands ls/cat/write/rm/df + network commands ip/ping), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About + Settings (via the monogram menu, manual page also via the HELP menu) |
+| **Motion (M8)** `wm.rs` | Eased open/close pop (scale around the window center, 220 ms), shrinking close ghosts drawn over the live windows, dock icons magnify under the cursor and launch icons hop (bounce), running-indicator dots under open apps, traffic-light hover glyphs (x/minus/zoom), menubar menus slide in, dirty-flag compositor throttled to ~60 fps with app-driven animation requests (equalizer) |
+| **Apps (M4)** `apps.rs` | Files (backed by ASPFS on disk: tabs + file list + detail pane loaded from disk), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about + disk commands ls/cat/write/rm/df + network commands ip/ping + reboot via 8042 reset), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About + Settings (via the monogram menu, manual page also via the HELP menu) |
+| **Apps (M8)** `apps.rs` | Music (playlist NEON DRIVE/SUNSET GRID/DEEP OCEAN, play/pause/prev/next, seek bar, live equalizer bars while playing), Notes (sidebar note list + editor, SAVE writes NOTE1..NOTE6.TXT to disk, notes reload from disk on boot and survive reboots) |
 | **Disk (M5)** `pci.rs`/`ahci.rs` | Own PCI config-space scan (ports 0xCF8/0xCFC): finds the AHCI controller (class 0106), enables memory space + bus mastering, hands BAR5 to the driver. `ahci.rs`: HBA init (GHC.AE), first port with DET=3, command list + FIS receive + command table in frames from our own PMM, READ/WRITE DMA EXT (LBA48) with polling (no interrupts), DMA staging buffer in `.bss` |
 | **File system (M5)** `fs.rs` | **ASPFS**, the own format: 4 KiB blocks, block 0 superblock (magic `ASPFS`), block bitmap (cached in memory), chained directory blocks with 128-byte entries (kind/name/start/count/size), files as contiguous extents. Mount/list/read/write/delete/free, all writes go back to disk through the AHCI driver — files survive reboots |
 | **mkfs (M5)** `tools/mkfs.rs` | Host tool (plain Rust, no deps): formats `build/aspect-data.img` (16 MiB) with the ASPFS layout and the seed files (SYSTEM/USERS/GUEST folders); wired into `make all` |
@@ -127,6 +133,7 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1" -Window
 - [x] **M5** Real file system: own PCI scan, own AHCI driver, own ASPFS format + mkfs tool; Files app and terminal read/write real, reboot-persistent files
 - [x] **M6** Network stack (QEMU): own PCI NIC discovery, own e1000 driver, own ARP/IPv4/ICMP stack, `IP`/`PING` terminal commands; real hardware next (USB stick)
 - [x] **M7** macOS-style menubar menus: monogram/app/FILE/VIEW/WINDOW/HELP dropdowns, live hover switching, theme picker with checkmarks, window list
+- [x] **M8** macOS polish: window open/close pop + close ghost, dock magnification + launch bounce + running dots, traffic-light hover glyphs, animated music player (equalizer, playlist, seek bar), Notes app with disk persistence, per-frame compositor throttling, `REBOOT` terminal command (8042 reset)
 
 ## License
 

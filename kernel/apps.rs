@@ -15,6 +15,8 @@ pub enum AppId {
     Paint,
     Settings,
     Browser,
+    Notes,
+    Music,
     About,
 }
 
@@ -26,6 +28,8 @@ pub fn title(app: AppId) -> &'static str {
         AppId::Paint => "PAINT",
         AppId::Settings => "SETTINGS",
         AppId::Browser => "BROWSER",
+        AppId::Notes => "NOTES",
+        AppId::Music => "MUSIC",
         AppId::About => "ABOUT",
     }
 }
@@ -38,6 +42,8 @@ pub fn default_size(app: AppId) -> (i32, i32) {
         AppId::Paint => (992, 664),
         AppId::Settings => (460, 320),
         AppId::Browser => (660, 460),
+        AppId::Notes => (560, 380),
+        AppId::Music => (520, 400),
         AppId::About => (440, 320),
     }
 }
@@ -59,6 +65,8 @@ pub fn init() {
     term_push_str("ASPECT OS TERMINAL");
     term_push_str("TYPE HELP FOR COMMANDS");
     term_push_str("");
+    notes_init();
+    music_init();
 }
 
 pub fn on_open(app: AppId) {
@@ -162,6 +170,7 @@ pub fn fs_populate() {
         }
         F_POP = true;
     }
+    notes_load_disk(); // pick up saved notes (NOTE1..6.TXT) from disk
 }
 
 /// length of a zero-terminated name buffer
@@ -370,7 +379,8 @@ fn term_exec(cmd: &[u8]) {
         term_push_str("HELP CLEAR ECHO VER");
         term_push_str("UPTIME MEM APPS ABOUT");
         term_push_str("LS CAT WRITE RM DF");
-        term_push_str("IP PING");    } else if eq("CLEAR") {
+        term_push_str("IP PING REBOOT");
+    } else if eq("CLEAR") {
         term_clear();
     } else if eq("ECHO") {
         term_push(rest);
@@ -403,6 +413,15 @@ fn term_exec(cmd: &[u8]) {
         term_ip();
     } else if eq("PING") {
         term_ping(rest);
+    } else if eq("REBOOT") {
+        // pulse the 8042 reset line: QEMU (and real hardware) resets the CPU
+        term_push_str("REBOOTING ...");
+        unsafe {
+            crate::io::outb(0x64, 0xFE);
+            loop {
+                core::arch::asm!("hlt", options(nomem, nostack));
+            }
+        }
     } else if ulen == 0 {
         // empty command: just a new prompt line
     } else {
@@ -1338,10 +1357,421 @@ fn about_draw(x: i32, y: i32, w: i32, h: i32) {
     gui::draw_line_t(x + 52, y + 20, x + 74, y + 78, 5, 0xFFF5A8E8);
     gui::draw_line_t(x + 38, y + 58, x + 66, y + 58, 5, 0xFFFFFFFF);
     gui::draw_text(x + 104, y + 28, "ASPECT OS", 5, 0xFFFFFFFF);
-    gui::draw_text(x + 104, y + 76, "VERSION 0.4 - MILESTONE 4", 2, 0xFF9A9AA6);
+    gui::draw_text(x + 104, y + 76, "VERSION 0.5 - AQUA", 2, 0xFF9A9AA6);
     gui::fill_rect(x + 24, y + 120, w - 48, 1, 0xFF33333E);
     draw_multiline(x + 24, y + 136,
-        "WINDOW COMPOSITOR WITH DRAG,\nFOCUS AND TRAFFIC LIGHTS.\n\nFILE MANAGER, PAINT, TERMINAL,\nCALCULATOR, SETTINGS, BROWSER.\n\n100% OWN RUST CODE.", 2, 0xFFC0C0CA, w - 48);
+        "WINDOW COMPOSITOR WITH DRAG,\nFOCUS, TRAFFIC LIGHTS AND\nMENUBAR MENUS.\n\nFILES, TERMINAL, PAINT, NOTES,\nMUSIC, BROWSER, SETTINGS.\n\nOPEN/CLOSE + DOCK ANIMATIONS.\n100% OWN RUST CODE.", 2, 0xFFC0C0CA, w - 48);
+}
+
+// =====================================================================
+// NOTES - sidebar list + editor; SAVE keeps notes on disk (NOTE1..6.TXT)
+// =====================================================================
+
+const NT_MAX: usize = 6;
+const NT_CAP: usize = 192;
+
+static mut NT_BUF: [[u8; NT_CAP]; NT_MAX] = [[0; NT_CAP]; NT_MAX];
+static mut NT_LEN: [usize; NT_MAX] = [0; NT_MAX];
+static mut NT_CNT: usize = 0;
+static mut NT_SEL: usize = 0;
+static mut NT_MSG: &str = "";
+static mut NT_W: i32 = 0; // content size of the last draw (click hit tests)
+static mut NT_H: i32 = 0;
+
+fn notes_init() {
+    unsafe {
+        NT_BUF = [[0; NT_CAP]; NT_MAX];
+        NT_LEN = [0; NT_MAX];
+        NT_CNT = 1;
+        NT_SEL = 0;
+        NT_MSG = "";
+        let w = b"WELCOME TO NOTES\n\nJUST TYPE TO WRITE.\nSAVE KEEPS THE NOTE ON DISK.";
+        NT_LEN[0] = w.len();
+        NT_BUF[0][..w.len()].copy_from_slice(w);
+    }
+}
+
+/// load NOTE1..NOTE6.TXT from the disk into the note list
+fn notes_load_disk() {
+    unsafe {
+        if !crate::fs::ready() {
+            return;
+        }
+        let mut tmp = [0u8; NT_CAP];
+        for i in 0..NT_MAX {
+            let mut name = [0u8; 12];
+            name[..9].copy_from_slice(b"NOTE1.TXT");
+            name[4] = b'1' + i as u8;
+            let n = crate::fs::read_file(0, &name[..9], &mut tmp);
+            if n > 0 {
+                let m = n.min(NT_CAP);
+                NT_BUF[i] = [0; NT_CAP];
+                NT_BUF[i][..m].copy_from_slice(&tmp[..m]);
+                NT_LEN[i] = m;
+                if NT_CNT <= i {
+                    NT_CNT = i + 1;
+                    NT_SEL = i;
+                }
+            }
+        }
+    }
+}
+
+fn notes_save() {
+    unsafe {
+        if !crate::fs::ready() {
+            NT_MSG = "NO DISK";
+            return;
+        }
+        for i in 0..NT_CNT {
+            if NT_LEN[i] == 0 {
+                continue;
+            }
+            let mut name = [0u8; 12];
+            name[..9].copy_from_slice(b"NOTE1.TXT");
+            name[4] = b'1' + i as u8;
+            crate::fs::write_file(0, &name[..9], &NT_BUF[i][..NT_LEN[i]]);
+        }
+        NT_MSG = "SAVED TO DISK";
+    }
+}
+
+fn notes_put(c: u8) {
+    unsafe {
+        if NT_LEN[NT_SEL] < NT_CAP {
+            NT_BUF[NT_SEL][NT_LEN[NT_SEL]] = c;
+            NT_LEN[NT_SEL] += 1;
+        }
+        NT_MSG = "";
+    }
+}
+
+fn notes_draw(x: i32, y: i32, w: i32, h: i32) {
+    gui::fill_rect(x, y, w, h, 0xFF202028);
+    unsafe {
+        NT_W = w;
+        NT_H = h;
+    }
+    let sw = 168; // sidebar width
+    gui::fill_rect(x, y, sw, h, 0xFF1C1C24);
+    gui::draw_text(x + 14, y + 10, "NOTES", 2, 0xFF9A9AA6);
+    unsafe {
+        // sidebar: first line of every note as its title
+        for i in 0..NT_CNT {
+            let ry = y + 40 + i as i32 * 26;
+            let sel = i == NT_SEL;
+            if sel {
+                gui::round_rect_fill(x + 6, ry - 4, sw - 12, 22, 6, 0xFF3E5E8E);
+            }
+            let b = &NT_BUF[i][..NT_LEN[i]];
+            let mut end = b.len();
+            for (k, c) in b.iter().enumerate() {
+                if *c == b'\n' {
+                    end = k;
+                    break;
+                }
+            }
+            let n = end.min(16);
+            gui::draw_text_b(x + 16, ry, &b[..n], 2,
+                             if sel { 0xFFFFFFFF } else { 0xFFB0B0BC });
+        }
+        gui::draw_text(x + 16, y + h - 26, "+ NEW", 2, 0xFF8AE88A);
+        // editor toolbar: SAVE button + status message
+        gui::round_rect_fill(x + w - 78, y + 8, 62, 24, 6, 0xFF2A2A34);
+        gui::draw_text(x + w - 66, y + 14, "SAVE", 2, 0xFFE8E8EC);
+        if !NT_MSG.is_empty() {
+            gui::draw_text(x + sw + 16, y + 16, NT_MSG, 2, 0xFF8AE88A);
+        }
+        gui::fill_rect(x + sw, y + 34, w - sw, 1, 0xFF33333E);
+        // editor: wrapped text, cursor block at the very end
+        let b = &NT_BUF[NT_SEL][..NT_LEN[NT_SEL]];
+        let tx = x + sw + 16;
+        let tw2 = w - sw - 32;
+        let mut gx = tx;
+        let mut gy = y + 46;
+        for &c in b {
+            if c == b'\n' {
+                gx = tx;
+                gy += 16;
+                continue;
+            }
+            if gx + 12 > tx + tw2 {
+                gx = tx;
+                gy += 16;
+            }
+            gui::draw_text_b(gx, gy, &[c], 2, 0xFFE8E8EC);
+            gx += 12;
+        }
+        gui::fill_rect(gx, gy + 1, 10, 14, 0xFF8AE88A);
+    }
+}
+
+fn notes_new() {
+    unsafe {
+        if NT_CNT < NT_MAX {
+            NT_CNT += 1;
+            NT_SEL = NT_CNT - 1;
+            NT_LEN[NT_SEL] = 0;
+            NT_BUF[NT_SEL] = [0; NT_CAP];
+            NT_MSG = "";
+        } else {
+            NT_MSG = "NOTE LIST FULL";
+        }
+    }
+}
+
+fn notes_click(lx: i32, ly: i32) {
+    unsafe {
+        let (w, h) = (NT_W, NT_H);
+        let sw = 168; // sidebar width
+        if lx < sw {
+            // sidebar rows
+            let r = (ly - 36) / 26;
+            if r >= 0 && (r as usize) < NT_CNT {
+                NT_SEL = r as usize;
+                NT_MSG = "";
+            }
+            // + NEW at the bottom of the sidebar
+            if ly >= h - 30 {
+                notes_new();
+            }
+            return;
+        }
+        // SAVE button in the toolbar
+        if ly <= 32 && lx >= w - 78 {
+            notes_save();
+        }
+    }
+}
+
+fn notes_key(code: u32) {
+    unsafe {
+        match code {
+            256 => notes_put(b'\n'),
+            257 => {
+                if NT_LEN[NT_SEL] > 0 {
+                    NT_LEN[NT_SEL] -= 1;
+                    NT_BUF[NT_SEL][NT_LEN[NT_SEL]] = 0;
+                }
+                NT_MSG = "";
+            }
+            c if (32..126).contains(&c) => notes_put(c as u8),
+            _ => {}
+        }
+    }
+}
+
+// =====================================================================
+// MUSIC - offline player: three tracks, transport, animated equalizer
+// =====================================================================
+
+const MU_N: usize = 3;
+const MU_TITLES: [&str; MU_N] = ["NEON DRIVE", "SUNSET GRID", "DEEP OCEAN"];
+const MU_ARTISTS: [&str; MU_N] = ["AURORA SYNTH", "RETRO WAVE", "AMBIENT"];
+const MU_SECS: [u64; MU_N] = [184, 152, 221];
+const MU_COLS: [[u32; 2]; MU_N] = [
+    [0xFF4C9AFF, 0xFF7C3AED],
+    [0xFFF97316, 0xFFDB2777],
+    [0xFF0EA5E9, 0xFF0E7490],
+];
+
+static mut MU_TRACK: usize = 0;
+static mut MU_PLAY: bool = false;
+static mut MU_T0: u64 = 0; // tick the current playback started
+static mut MU_BASE: u64 = 0; // seconds accumulated before that
+static mut MU_W: i32 = 0; // content size of the last draw (click hit tests)
+static mut MU_H: i32 = 0;
+
+fn music_init() {
+    unsafe {
+        MU_TRACK = 0;
+        MU_PLAY = false;
+        MU_T0 = 0;
+        MU_BASE = 0;
+    }
+}
+
+/// seconds into the current track
+fn music_elapsed() -> u64 {
+    unsafe {
+        if MU_PLAY {
+            MU_BASE + (crate::pit::ticks() - MU_T0) / 1000
+        } else {
+            MU_BASE
+        }
+    }
+}
+
+fn music_toggle() {
+    unsafe {
+        if MU_PLAY {
+            MU_BASE = music_elapsed();
+            MU_PLAY = false;
+        } else {
+            MU_T0 = crate::pit::ticks();
+            MU_PLAY = true;
+        }
+    }
+}
+
+fn music_next() {
+    unsafe {
+        MU_TRACK = (MU_TRACK + 1) % MU_N;
+        MU_BASE = 0;
+        MU_T0 = crate::pit::ticks();
+    }
+}
+
+fn music_prev() {
+    unsafe {
+        if music_elapsed() > 4 {
+            MU_BASE = 0; // restart the same track
+        } else {
+            MU_TRACK = (MU_TRACK + MU_N - 1) % MU_N;
+        }
+        MU_T0 = crate::pit::ticks();
+    }
+}
+
+/// "M:SS" into a byte buffer
+fn mmss(out: &mut [u8], len: &mut usize, secs: u64) {
+    num_into(out, len, secs / 60);
+    if *len < out.len() {
+        out[*len] = b':';
+        *len += 1;
+    }
+    if secs % 60 < 10 && *len < out.len() {
+        out[*len] = b'0';
+        *len += 1;
+    }
+    num_into(out, len, secs % 60);
+}
+
+fn music_draw(x: i32, y: i32, w: i32, h: i32) {
+    gui::fill_rect(x, y, w, h, 0xFF202028);
+    unsafe {
+        MU_W = w;
+        MU_H = h;
+        // auto-advance at the end of the track
+        if MU_PLAY && music_elapsed() >= MU_SECS[MU_TRACK] {
+            music_next();
+        }
+        let t = MU_TRACK;
+        let (c0, c1) = (MU_COLS[t][0], MU_COLS[t][1]);
+        // artwork with a note glyph
+        let (ax, ay, az) = (x + 24, y + 24, 140);
+        gui::round_rect_fill(ax, ay, az, az, 12, c1);
+        gui::round_rect_blend(ax + 6, ay + 6, az - 12, az / 2, 8, c0, 100);
+        gui::circle_fill(ax + az / 2 - 8, ay + az - 36, 5, 0xFFFFFFFF);
+        gui::draw_line_t(ax + az / 2 - 3, ay + az - 36, ax + az / 2 - 3, ay + 36, 3, 0xFFFFFFFF);
+        gui::draw_line_t(ax + az / 2 - 3, ay + 36, ax + az / 2 + 15, ay + 48, 3, 0xFFFFFFFF);
+        // titles
+        gui::draw_text(x + 190, y + 30, MU_TITLES[t], 3, 0xFFFFFFFF);
+        gui::draw_text(x + 190, y + 62, MU_ARTISTS[t], 2, 0xFF9A9AA6);
+        // track list
+        for i in 0..MU_N {
+            let ry = y + 100 + i as i32 * 30;
+            let sel = i == t;
+            if sel {
+                gui::round_rect_fill(x + 184, ry - 5, w - 208, 24, 6, 0xFF3E5E8E);
+            }
+            gui::draw_text(x + 196, ry, MU_TITLES[i], 2,
+                           if sel { 0xFFFFFFFF } else { 0xFFB0B0BC });
+            let mut tb = [0u8; 8];
+            let mut tl = 0usize;
+            mmss(&mut tb, &mut tl, MU_SECS[i]);
+            gui::draw_text_b(x + w - 24 - gui::text_w_b(&tb[..tl], 2), ry, &tb[..tl], 2,
+                             if sel { 0xFFC8C8D0 } else { 0xFF8A8A96 });
+        }
+        // progress bar + times
+        let el = music_elapsed().min(MU_SECS[t]);
+        let py = y + 208;
+        gui::round_rect_fill(x + 24, py, w - 48, 6, 3, 0xFF16161C);
+        let fill = ((w - 48) as u64 * el / MU_SECS[t]) as i32;
+        if fill > 6 {
+            gui::round_rect_fill(x + 24, py, fill, 6, 3, 0xFF3E5E8E);
+        }
+        gui::circle_fill(x + 24 + fill, py + 3, 6, 0xFFE8E8EC);
+        let mut tb = [0u8; 8];
+        let mut tl = 0usize;
+        mmss(&mut tb, &mut tl, el);
+        gui::draw_text_b(x + 24, py + 12, &tb[..tl], 1, 0xFF9A9AA6);
+        let mut tb2 = [0u8; 8];
+        let mut tl2 = 0usize;
+        mmss(&mut tb2, &mut tl2, MU_SECS[t]);
+        gui::draw_text_b(x + w - 24 - gui::text_w_b(&tb2[..tl2], 1), py + 12, &tb2[..tl2], 1,
+                         0xFF9A9AA6);
+        // transport: prev / play / next
+        let cx0 = x + w / 2;
+        let cy0 = y + 254;
+        gui::circle_fill(cx0 - 56, cy0, 18, 0xFF2A2A34);
+        gui::circle_fill(cx0, cy0, 22, 0xFF3E5E8E);
+        gui::circle_fill(cx0 + 56, cy0, 18, 0xFF2A2A34);
+        // prev: bar + left-pointing triangle
+        gui::fill_rect(cx0 - 64, cy0 - 6, 3, 12, 0xFFFFFFFF);
+        gui::draw_line_t(cx0 - 49, cy0, cx0 - 43, cy0 - 6, 2, 0xFFFFFFFF);
+        gui::draw_line_t(cx0 - 49, cy0, cx0 - 43, cy0 + 6, 2, 0xFFFFFFFF);
+        // play / pause
+        if MU_PLAY {
+            gui::fill_rect(cx0 - 7, cy0 - 8, 5, 16, 0xFFFFFFFF);
+            gui::fill_rect(cx0 + 3, cy0 - 8, 5, 16, 0xFFFFFFFF);
+        } else {
+            gui::draw_line_t(cx0 + 8, cy0, cx0 - 8, cy0 - 9, 2, 0xFFFFFFFF);
+            gui::draw_line_t(cx0 + 8, cy0, cx0 - 8, cy0 + 9, 2, 0xFFFFFFFF);
+            gui::draw_line_t(cx0 - 8, cy0 - 9, cx0 - 8, cy0 + 9, 2, 0xFFFFFFFF);
+        }
+        // next: bar + right-pointing triangle
+        gui::fill_rect(cx0 + 62, cy0 - 6, 3, 12, 0xFFFFFFFF);
+        gui::draw_line_t(cx0 + 49, cy0, cx0 + 43, cy0 - 6, 2, 0xFFFFFFFF);
+        gui::draw_line_t(cx0 + 49, cy0, cx0 + 43, cy0 + 6, 2, 0xFFFFFFFF);
+        // equalizer: triangle waves while playing, flat when paused
+        let by = y + h - 26;
+        let n = ((w - 48) / 14).max(1) as usize;
+        for i in 0..n {
+            let bx = x + 24 + i as i32 * 14;
+            let ht = if MU_PLAY {
+                let ph = ((crate::pit::ticks() / 90 + (i as u64 + 1) * 37) % 128) as i32;
+                let tri = 128 - (ph - 64).abs();
+                4 + (tri * 30 >> 7)
+            } else {
+                4
+            };
+            let col = gui::mix(0xFF3E5E8E, 0xFF8AB4FF, (i * 255 / n) as i32);
+            gui::fill_rect(bx, by - ht, 8, ht, col);
+        }
+        if MU_PLAY {
+            wm::anim_request(120); // keep the frames coming while playing
+        }
+    }
+}
+
+fn music_click(lx: i32, ly: i32) {
+    unsafe {
+        let w = MU_W;
+        // track list rows
+        if lx >= 184 && ly >= 95 && ly < 95 + MU_N as i32 * 30 {
+            let t = ((ly - 95) / 30) as usize;
+            if t < MU_N {
+                if MU_TRACK != t {
+                    MU_TRACK = t;
+                    MU_BASE = 0;
+                    MU_T0 = crate::pit::ticks();
+                }
+                return;
+            }
+        }
+        // transport circles
+        let cx = lx - w / 2;
+        let cy = ly - 254;
+        let near = |dx: i32, dy: i32, r: i32| dx * dx + dy * dy <= r * r;
+        if near(cx + 56, cy, 20) {
+            music_prev();
+        } else if near(cx, cy, 24) {
+            music_toggle();
+        } else if near(cx - 56, cy, 20) {
+            music_next();
+        }
+    }
 }
 
 // =====================================================================
@@ -1356,6 +1786,8 @@ pub fn draw(app: AppId, x: i32, y: i32, w: i32, h: i32) {
         AppId::Paint => paint_draw(x, y, w, h),
         AppId::Settings => settings_draw(x, y, w, h),
         AppId::Browser => browser_draw(x, y, w, h),
+        AppId::Notes => notes_draw(x, y, w, h),
+        AppId::Music => music_draw(x, y, w, h),
         AppId::About => about_draw(x, y, w, h),
     }
 }
@@ -1367,6 +1799,8 @@ pub fn on_click(app: AppId, lx: i32, ly: i32) {
         AppId::Paint => paint_click(lx, ly),
         AppId::Settings => settings_click(lx, ly),
         AppId::Browser => browser_click(lx, ly),
+        AppId::Notes => notes_click(lx, ly),
+        AppId::Music => music_click(lx, ly),
         _ => {}
     }
 }
@@ -1383,6 +1817,7 @@ pub fn on_key(app: AppId, code: u32) {
         AppId::Calc => calc_key(code),
         AppId::Browser => browser_key(code),
         AppId::Files => files_key(code),
+        AppId::Notes => notes_key(code),
         _ => {}
     }
 }

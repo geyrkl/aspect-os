@@ -126,12 +126,12 @@ pub fn set_clip(x: i32, y: i32, w: i32, h: i32) {
 // colors are 0xAARRGGBB
 #[inline]
 pub fn mix(d: u32, s: u32, a: i32) -> u32 {
-    let dr = (d & 255) as i32;
+    let dr = ((d >> 16) & 255) as i32;
     let dg = ((d >> 8) & 255) as i32;
-    let db = ((d >> 16) & 255) as i32;
-    let sr = (s & 255) as i32;
+    let db = (d & 255) as i32;
+    let sr = ((s >> 16) & 255) as i32;
     let sg = ((s >> 8) & 255) as i32;
-    let sb = ((s >> 16) & 255) as i32;
+    let sb = (s & 255) as i32;
     let r = dr + (((sr - dr) * a) >> 8);
     let g = dg + (((sg - dg) * a) >> 8);
     let b = db + (((sb - db) * a) >> 8);
@@ -606,39 +606,79 @@ pub fn draw_text_b(x: i32, y: i32, b: &[u8], sc: i32, c: u32) {
     }
 }
 
-// --- dock (geometry shared with the window manager for hit tests) ---
-pub const DOCK_N: usize = 6;
+// --- dock (dynamic: cursor magnification, launch bounce, running dots) ---
+pub const DOCK_N: usize = 8;
+const DOCK_IS: i32 = 44; // base icon size
+const DOCK_GAP: i32 = 10;
+const DOCK_PAD: i32 = 12;
 
-pub fn dock_geom() -> (i32, i32, i32, i32) {
-    let n = DOCK_N as i32;
-    let is = 44;
-    let gap = 10;
-    let pad = 12;
-    let dw = n * is + (n - 1) * gap + 2 * pad;
-    let dx0 = (tw() - dw) / 2;
-    let dy0 = th() - (is + 2 * pad) - 10;
-    (dx0, dy0, dw, is + 2 * pad)
+// layout of the last drawn dock (hit tests between frames read this)
+static mut D_X: [i32; DOCK_N] = [0; DOCK_N];
+static mut D_Y: [i32; DOCK_N] = [0; DOCK_N];
+static mut D_S: [i32; DOCK_N] = [0; DOCK_N];
+static mut D_PANEL: (i32, i32, i32, i32) = (0, 0, 0, 0);
+
+/// compute and store the icon layout for the current magnification
+/// (mag[i]: 0..=256, 256 = fully magnified, +16 px)
+fn dock_layout(mag: &[i32; DOCK_N]) {
+    unsafe {
+        let mut w = DOCK_PAD * 2;
+        for i in 0..DOCK_N {
+            D_S[i] = DOCK_IS + (mag[i] * 16 >> 8);
+            w += D_S[i];
+        }
+        w += (DOCK_N as i32 - 1) * DOCK_GAP;
+        let x0 = (tw() - w) / 2;
+        let yb = th() - 10 - DOCK_PAD; // bottom edge of the icon row
+        D_PANEL = (x0, yb - DOCK_IS - DOCK_PAD, w, DOCK_IS + 2 * DOCK_PAD);
+        let mut x = x0 + DOCK_PAD;
+        for i in 0..DOCK_N {
+            D_X[i] = x;
+            D_Y[i] = yb - D_S[i]; // icons stay anchored at the bottom
+            x += D_S[i] + DOCK_GAP;
+        }
+    }
 }
 
-/// icon square: (x, y, size)
-pub fn dock_icon_rect(i: usize) -> (i32, i32, i32) {
-    let (dx0, dy0, _, _) = dock_geom();
-    let is = 44;
-    let gap = 10;
-    let pad = 12;
-    (dx0 + pad + i as i32 * (is + gap), dy0 + pad, is)
+/// which dock icon sits under (cx, cy)? -1 = none
+pub fn dock_hit(cx: i32, cy: i32) -> i32 {
+    unsafe {
+        let (px, py, pw, ph) = D_PANEL;
+        if cx < px || cx >= px + pw || cy < py - 24 || cy >= py + ph + 8 {
+            return -1;
+        }
+        for i in 0..DOCK_N {
+            if cx >= D_X[i] - DOCK_GAP / 2 && cx < D_X[i] + D_S[i] + DOCK_GAP / 2 {
+                return i as i32;
+            }
+        }
+    }
+    -1
 }
 
-pub fn draw_dock() {
-    let (dx0, dy0, dw, dh) = dock_geom();
+/// draw the dock for one frame: panel, icons magnified around the cursor,
+/// launch bounce lift, running-app indicator dots
+pub fn draw_dock(mag: &[i32; DOCK_N], bounce: i32, lift: i32, running: &[bool; DOCK_N]) {
+    dock_layout(mag);
+    let (dpx, dpy, dpw, dph) = unsafe { D_PANEL };
+    round_rect_blend(dpx, dpy, dpw, dph, 18, 0x14141A, 125);
+    round_rect_stroke(dpx, dpy, dpw, dph, 18, 2, 0x3A3A46);
 
-    round_rect_blend(dx0, dy0, dw, dh, 18, 0x14141A, 125);
-    round_rect_stroke(dx0, dy0, dw, dh, 18, 2, 0x3A3A46);
-
-    let tops: [u32; DOCK_N] = [0xFF4C9AFF, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA, 0xFFF87171, 0xFF94A3B8];
-    let bots: [u32; DOCK_N] = [0xFF1D4ED8, 0xFF059669, 0xFFD97706, 0xFF7C3AED, 0xFFDC2626, 0xFF475569];
+    let tops: [u32; DOCK_N] = [
+        0xFF4C9AFF, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA,
+        0xFFF97316, 0xFFF472B6, 0xFFF87171, 0xFF94A3B8,
+    ];
+    let bots: [u32; DOCK_N] = [
+        0xFF1D4ED8, 0xFF059669, 0xFFD97706, 0xFF7C3AED,
+        0xFFC2410C, 0xFFDB2777, 0xFFDC2626, 0xFF475569,
+    ];
+    let dot_y = dpy + dph - 4;
     for i in 0..DOCK_N {
-        let (ix, iy, is) = dock_icon_rect(i);
+        let (ix, iy0, is) = unsafe { (D_X[i], D_Y[i], D_S[i]) };
+        let mut iy = iy0;
+        if i as i32 == bounce {
+            iy -= lift; // launch bounce hops above the panel
+        }
         // icon body: vertical gradient
         for y in 0..is {
             let tt = y * 255 / (is - 1);
@@ -676,6 +716,19 @@ pub fn draw_dock() {
                 draw_line_t(cx - 10, cy + 10, cx - 10, cy - 10, 3, wh);
             }
             4 => {
+                // notes: page with lines
+                fill_rect(cx - 9, cy - 12, 18, 24, wh);
+                fill_rect(cx - 6, cy - 7, 12, 2, bots[i]);
+                fill_rect(cx - 6, cy - 1, 12, 2, bots[i]);
+                fill_rect(cx - 6, cy + 5, 8, 2, bots[i]);
+            }
+            5 => {
+                // music: eighth note
+                circle_fill(cx - 5, cy + 7, 4, wh);
+                draw_line_t(cx - 1, cy + 7, cx - 1, cy - 10, 2, wh);
+                draw_line_t(cx - 1, cy - 10, cx + 8, cy - 5, 2, wh);
+            }
+            6 => {
                 // settings: gear-ish
                 ring_circle(cx, cy, 8, 3, wh);
                 draw_line_t(cx, cy - 13, cx, cy - 9, 3, wh);
@@ -689,16 +742,20 @@ pub fn draw_dock() {
                 fill_rect(cx - 12, cy + 6, 5, 5, wh);
             }
         }
+        if running[i] {
+            circle_fill(ix + is / 2, dot_y, 2, 0xFFF0F0F4);
+        }
     }
 }
 
 // --- desktop background: render once, blit every frame ---
+// (the dock is NOT baked in: it is drawn per frame so it can magnify,
+// bounce and show running indicators)
 fn bg_render() {
     set_target_bg();
     draw_gradient();
     draw_menubar();
     crate::logo::draw_wordmark(tw() / 2, th() * 40 / 100, 5);
-    draw_dock();
     set_target_fb();
 }
 

@@ -4,6 +4,7 @@
 #![allow(unknown_lints, static_mut_refs, dead_code)]
 use crate::apps::{self, AppId};
 use crate::gui;
+use crate::pit;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const MAXW: usize = 8;
@@ -18,12 +19,25 @@ pub struct Win {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    pub birth: u64, // tick the window opened (open animation)
 }
 
 // z-order: index 0 = back, index N-1 = front (focused)
 static mut WINS: [Option<Win>; MAXW] = [None; MAXW];
 static mut N: usize = 0;
 static mut DIRTY: bool = false;
+
+// ---- motion (M8): window open/close, menu slide-in, dock motion ----
+const OPEN_MS: u64 = 220; // window open/close scale animation
+const MENU_MS: u64 = 140; // menu panel slide-in
+static mut MENU_T0: u64 = 0; // tick the open menu started its slide
+static mut GHOSTS: [Option<(Win, u64)>; 4] = [None; 4]; // closing windows
+static mut MAG: [i32; 8] = [0; 8]; // dock magnification 0..=256
+static mut BOUNCE: i32 = -1; // dock icon currently launching
+static mut B_T0: u64 = 0;
+static mut ANIM_DL: u64 = 0; // app-driven animation deadline (ticks)
+static mut LAST_FRAME: u64 = 0; // frame throttle
+static mut FRAMES: bool = false; // a throttled frame was drawn already
 
 // ---- input queues (IRQ producer, main-loop consumer) ----
 const QN: usize = 128;
@@ -110,6 +124,101 @@ fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
     }
 }
 
+/// ease-out curve, p in 0..=256 -> 0..=256 (fast start, soft landing)
+#[inline]
+fn ease(p: i32) -> i32 {
+    let q = 256 - p;
+    256 - (q * q >> 8)
+}
+
+/// consume the dirty flag, throttled to one full redraw per ~16 ms
+/// (an omitted redraw keeps the flag set for a later tick)
+pub fn take_dirty() -> bool {
+    unsafe {
+        if !DIRTY {
+            return false;
+        }
+        let now = pit::ticks();
+        if FRAMES && now < LAST_FRAME + 16 {
+            return false;
+        }
+        LAST_FRAME = now;
+        FRAMES = true;
+        DIRTY = false;
+        true
+    }
+}
+
+/// force the next frame (animations, app-driven repaints)
+pub fn mark_dirty() {
+    unsafe {
+        DIRTY = true;
+    }
+}
+
+/// app-driven continuous animation (e.g. the music equalizer)
+pub fn anim_request(ms: u64) {
+    unsafe {
+        let d = pit::ticks() + ms;
+        if d > ANIM_DL {
+            ANIM_DL = d;
+        }
+    }
+}
+
+/// dock magnification target for icon i (hover = slot under the cursor)
+fn dock_mag_target(i: usize, hover: i32) -> i32 {
+    if hover < 0 {
+        return 0;
+    }
+    let d = (i as i32 - hover).abs();
+    match d {
+        0 => 256,
+        1 => 110,
+        2 => 40,
+        _ => 0,
+    }
+}
+
+/// is any animation running? the event loop keeps redrawing while true
+pub fn animating() -> bool {
+    unsafe {
+        let now = pit::ticks();
+        if now < ANIM_DL {
+            return true;
+        }
+        for g in GHOSTS.iter() {
+            if let Some((_, t0)) = *g {
+                if now - t0 < OPEN_MS {
+                    return true;
+                }
+            }
+        }
+        for i in 0..N {
+            if let Some(w) = WINS[i] {
+                if now - w.birth < OPEN_MS {
+                    return true;
+                }
+            }
+        }
+        if MENU_OPEN >= 0 && now - MENU_T0 < MENU_MS {
+            return true;
+        }
+        if BOUNCE >= 0 && now - B_T0 < 640 {
+            return true;
+        }
+        // dock magnification not settled yet?
+        let (cx, cy) = gui::cursor_pos();
+        let h = gui::dock_hit(cx, cy);
+        for i in 0..gui::DOCK_N {
+            if MAG[i] != dock_mag_target(i, h) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 pub fn init() {
     unsafe {
         for i in 0..MAXW {
@@ -119,6 +228,14 @@ pub fn init() {
         DIRTY = false;
         HELD = false;
         DRAG = NO_DRAG;
+        MENU_T0 = 0;
+        GHOSTS = [None; 4];
+        MAG = [0; 8];
+        BOUNCE = -1;
+        B_T0 = 0;
+        ANIM_DL = 0;
+        LAST_FRAME = 0;
+        FRAMES = false;
     }
     MQ_HEAD.store(0, Ordering::Relaxed);
     MQ_TAIL.store(0, Ordering::Relaxed);
@@ -128,17 +245,6 @@ pub fn init() {
 
 pub fn count() -> usize {
     unsafe { N }
-}
-
-pub fn take_dirty() -> bool {
-    unsafe {
-        if DIRTY {
-            DIRTY = false;
-            true
-        } else {
-            false
-        }
-    }
 }
 
 // content area of a window (inside the 2px frame, below the title bar,
@@ -167,6 +273,7 @@ fn raise(i: usize) -> usize {
 
 fn close(i: usize) {
     unsafe {
+        let gone = WINS[i];
         let mut j = i;
         while j + 1 < N {
             WINS[j] = WINS[j + 1];
@@ -175,6 +282,17 @@ fn close(i: usize) {
         WINS[N - 1] = None;
         N -= 1;
         DRAG = NO_DRAG;
+        // keep a shrinking ghost for the close animation
+        if let Some(w) = gone {
+            let mut s = 0;
+            while s < 4 && GHOSTS[s].is_some() {
+                s += 1;
+            }
+            if s == 4 {
+                s = 0; // overwrite the oldest ghost
+            }
+            GHOSTS[s] = Some((w, pit::ticks()));
+        }
         DIRTY = true;
     }
 }
@@ -200,7 +318,7 @@ pub fn open(app: AppId) {
         let k = N as i32;
         let x = (96 + 40 * (k % 6)).min(sw - w - 8).max(8);
         let y = (64 + 40 * (k % 6)).max(MIN_Y).min(sh - h - 8);
-        WINS[N] = Some(Win { app, x, y, w, h });
+        WINS[N] = Some(Win { app, x, y, w, h, birth: pit::ticks() });
         N += 1;
         apps::on_open(app);
         DIRTY = true;
@@ -213,7 +331,9 @@ fn dock_app(i: usize) -> AppId {
         1 => AppId::Files,
         2 => AppId::Paint,
         3 => AppId::Terminal,
-        4 => AppId::Settings,
+        4 => AppId::Notes,
+        5 => AppId::Music,
+        6 => AppId::Settings,
         _ => AppId::Calc,
     }
 }
@@ -281,7 +401,7 @@ fn menu_len(m: i32) -> usize {
     match m {
         0 => 3, // ABOUT THIS OS | SETTINGS
         1 => unsafe { if N > 0 { 1 } else { 0 } },
-        2 => 6, // four app opens | CLOSE WINDOW
+        2 => 8, // six app opens | CLOSE WINDOW
         3 => 4, // themes
         4 => unsafe { N },
         5 => 1, // OPEN MANUAL
@@ -306,7 +426,9 @@ fn menu_label(m: i32, r: usize) -> Option<&'static str> {
             1 => Some("OPEN TERMINAL"),
             2 => Some("OPEN PAINT"),
             3 => Some("OPEN BROWSER"),
-            5 => Some("CLOSE WINDOW"),
+            4 => Some("OPEN NOTES"),
+            5 => Some("OPEN MUSIC"),
+            7 => Some("CLOSE WINDOW"),
             _ => None,
         },
         3 => Some(gui::theme_name(r)),
@@ -350,7 +472,9 @@ fn run_item(m: i32, r: usize) {
             1 => open(AppId::Terminal),
             2 => open(AppId::Paint),
             3 => open(AppId::Browser),
-            5 => unsafe {
+            4 => open(AppId::Notes),
+            5 => open(AppId::Music),
+            7 => unsafe {
                 if N > 0 {
                     close(N - 1);
                 }
@@ -417,6 +541,7 @@ fn menu_hover(cx: i32, cy: i32) {
             if hit != m && menu_len(hit) > 0 {
                 MENU_OPEN = hit;
                 MENU_HOVER = -1;
+                MENU_T0 = pit::ticks(); // restart the slide-in
                 DIRTY = true;
             }
             return;
@@ -444,6 +569,14 @@ fn draw_menu(m: i32) {
         if n == 0 {
             return;
         }
+        // slide-in animation: the panel starts 14 px higher, shadow fades in
+        let el = pit::ticks().saturating_sub(MENU_T0);
+        let e = if el >= MENU_MS {
+            256
+        } else {
+            ease(((el * 256 / MENU_MS) as i32).min(256))
+        };
+        let off = (256 - e) * 14 >> 8;
         // highlighted title in the bar
         let (tx0, tx1) = menu_rect(m);
         gui::round_rect_fill(tx0 - 6, 2, tx1 - tx0 + 12, 24, 6, ACCENT);
@@ -454,8 +587,10 @@ fn draw_menu(m: i32) {
         }
         // dropdown: shadow + panel
         let (px, py, pw, _) = menu_panel(m);
+        let py = py - off;
         let ph = n as i32 * 20 + 8;
-        gui::round_rect_blend(px - 8, py, pw + 16, ph + 12, 14, 0x000000, 120);
+        gui::round_rect_blend(px - 8, py, pw + 16, ph + 12, 14, 0x000000, 120 * e >> 8);
+        gui::round_rect_fill(px, py, pw, ph, 10, 0xFF1F1F26);
         gui::round_rect_fill(px, py, pw, ph, 10, 0xFF1F1F26);
         gui::blend_rect(px + 3, py + 1, pw - 6, 1, 0xFFFFFF, 26);
         for r in 0..n {
@@ -517,6 +652,7 @@ fn press(cx: i32, cy: i32) {
             if menu_len(hit) > 0 {
                 MENU_OPEN = hit;
                 MENU_HOVER = -1;
+                MENU_T0 = pit::ticks();
             }
             DIRTY = true;
             return;
@@ -556,12 +692,12 @@ fn press(cx: i32, cy: i32) {
             }
         }
         // dock icons
-        for d in 0..gui::DOCK_N {
-            let (ix, iy, is) = gui::dock_icon_rect(d);
-            if cx >= ix - 6 && cx < ix + is + 6 && cy >= iy - 6 && cy < iy + is + 6 {
-                open(dock_app(d));
-                return;
-            }
+        let d = gui::dock_hit(cx, cy);
+        if d >= 0 {
+            BOUNCE = d;
+            B_T0 = pit::ticks();
+            open(dock_app(d as usize));
+            return;
         }
     }
 }
@@ -653,30 +789,102 @@ pub fn on_key() {
     }
 }
 
-/// draw one window: shadow, body, title bar, traffic lights, title, content
-fn draw_window(focused: bool, w: Win) {
-    // drop shadow
-    gui::round_rect_blend(w.x - 8, w.y - 2, w.w + 16, w.h + 16, 18, 0x000000,
-                          if focused { 110 } else { 70 });
+/// draw one window scaled by k/256 around its center (k = 256 full size)
+fn draw_win(focused: bool, w: Win, k: i32) {
+    let nw = (w.w * k >> 8).max(24);
+    let nh = (w.h * k >> 8).max(24);
+    let sw = Win {
+        app: w.app,
+        x: w.x + (w.w - nw) / 2,
+        y: w.y + (w.h - nh) / 2,
+        w: nw,
+        h: nh,
+        birth: 0,
+    };
+    // drop shadow (fades in with the pop)
+    let sh = (if focused { 110 } else { 70 }) * k >> 8;
+    gui::round_rect_blend(sw.x - 8, sw.y - 2, sw.w + 16, sw.h + 16, 18, 0x000000, sh);
     // body
-    gui::round_rect_fill(w.x, w.y, w.w, w.h, 12, 0xFF1B1B21);
+    gui::round_rect_fill(sw.x, sw.y, sw.w, sw.h, 12, 0xFF1B1B21);
     // title strip (kept inside the rounded top corners)
-    gui::blend_rect(w.x + 2, w.y + 6, w.w - 4, TITLE_H - 8, 0xFFFFFF,
+    gui::blend_rect(sw.x + 2, sw.y + 6, sw.w - 4, TITLE_H - 8, 0xFFFFFF,
                     if focused { 16 } else { 7 });
     // traffic lights
-    let ly = w.y + TITLE_H / 2;
-    gui::circle_fill(w.x + 18, ly, 5, 0xFFFF5F57);
-    gui::circle_fill(w.x + 34, ly, 5, 0xFFFEBC2E);
-    gui::circle_fill(w.x + 50, ly, 5, 0xFF28C840);
+    let ly = sw.y + TITLE_H / 2;
+    gui::circle_fill(sw.x + 18, ly, 5, 0xFFFF5F57);
+    gui::circle_fill(sw.x + 34, ly, 5, 0xFFFEBC2E);
+    gui::circle_fill(sw.x + 50, ly, 5, 0xFF28C840);
+    // hover the title bar: glyphs appear on the lights (close / minus / zoom)
+    let (mx, my) = gui::cursor_pos();
+    if mx >= sw.x && mx < sw.x + sw.w && my >= sw.y && my < sw.y + TITLE_H {
+        gui::draw_line_t(sw.x + 15, ly - 3, sw.x + 21, ly + 3, 2, 0xFF7A1210);
+        gui::draw_line_t(sw.x + 15, ly + 3, sw.x + 21, ly - 3, 2, 0xFF7A1210);
+        gui::fill_rect(sw.x + 30, ly, 8, 2, 0xFF9A6A00);
+        gui::round_rect_stroke(sw.x + 45, ly - 4, 10, 9, 2, 1, 0xFF0E7A18);
+    }
     // title
     let name = apps::title(w.app);
     let tw = gui::text_w(name, 2);
-    gui::draw_text(w.x + (w.w - tw) / 2, w.y + 8, name, 2, 0xFFC8C8D0);
+    gui::draw_text(sw.x + (sw.w - tw) / 2, sw.y + 8, name, 2, 0xFFC8C8D0);
     // content (clipped)
-    let (cx, cy, cw, ch) = content_rect(w);
+    let (cx, cy, cw, ch) = content_rect(sw);
     gui::set_clip(cx, cy, cw, ch);
     apps::draw(w.app, cx, cy, cw, ch);
     gui::clear_clip();
+}
+
+/// draw one window with its open animation applied (fresh windows pop in)
+fn draw_window(focused: bool, w: Win, now: u64) {
+    let el = now.saturating_sub(w.birth);
+    let k = if el >= OPEN_MS {
+        256
+    } else {
+        192 + (64 * ease(((el * 256 / OPEN_MS) as i32).min(256)) >> 8)
+    };
+    draw_win(focused, w, k);
+}
+
+/// advance dock magnification toward the cursor; returns (bounce icon,
+/// bounce lift, running flags per dock slot)
+unsafe fn dock_anim() -> (i32, i32, [bool; 8]) {
+    let (cx, cy) = gui::cursor_pos();
+    let h = gui::dock_hit(cx, cy);
+    for i in 0..gui::DOCK_N {
+        let t = dock_mag_target(i, h);
+        let m = MAG[i];
+        MAG[i] = if m < t {
+            (m + 40).min(t)
+        } else if m > t {
+            (m - 40).max(t)
+        } else {
+            m
+        };
+    }
+    let mut run = [false; 8];
+    for d in 0..gui::DOCK_N {
+        let app = dock_app(d);
+        for i in 0..N {
+            if let Some(w) = WINS[i] {
+                if w.app == app {
+                    run[d] = true;
+                    break;
+                }
+            }
+        }
+    }
+    let now = pit::ticks();
+    let mut bounce = -1;
+    let mut lift = 0;
+    if BOUNCE >= 0 && now - B_T0 < 640 {
+        bounce = BOUNCE;
+        // two hops of 320 ms: triangle envelope over the hop
+        let p = ((now - B_T0) * 256 / 320) % 512;
+        let tri = if p < 256 { p as i32 } else { (511 - p) as i32 };
+        lift = tri * 18 >> 8;
+    } else {
+        BOUNCE = -1;
+    }
+    (bounce, lift, run)
 }
 
 /// draw the static menubar titles over the background bar
@@ -689,14 +897,38 @@ fn draw_menu_titles() {
     }
 }
 
-/// full-screen compositor pass: desktop background, windows back to front, cursor
+/// full-screen compositor pass: background, dock, windows back to front,
+/// close ghosts, menubar menus, cursor
 pub fn redraw() {
     unsafe {
+        let now = pit::ticks();
         gui::blit_bg();
+        // the clock lives in the background bar: blit_bg wipes it, so it is
+        // drawn every frame right after the background
+        gui::draw_clock(now / 1000);
+        // the dock is dynamic: magnification, bounce, running dots
+        let (bounce, lift, run) = dock_anim();
+        gui::draw_dock(&MAG, bounce, lift, &run);
         for i in 0..N {
             if let Some(w) = WINS[i] {
-                draw_window(i == N - 1, w);
+                draw_window(i == N - 1, w, now);
             }
+        }
+        // closing ghosts shrink away on top of the live windows
+        let mut k = 0usize;
+        for g in 0..4 {
+            if let Some((w, t0)) = GHOSTS[g] {
+                if now - t0 < OPEN_MS {
+                    let p = ((now - t0) * 256 / OPEN_MS) as i32;
+                    let kk = 256 - (64 * ease(p.min(256)) >> 8);
+                    draw_win(false, w, kk);
+                    GHOSTS[k] = Some((w, t0));
+                    k += 1;
+                }
+            }
+        }
+        for i in k..4 {
+            GHOSTS[i] = None;
         }
         // macOS-style menubar titles live over the background bar
         draw_menu_titles();

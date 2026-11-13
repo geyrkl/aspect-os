@@ -155,18 +155,22 @@ fn kernel_main(bi: *const BootInfo) {
     gui::init_cursor();
     serial::log("M4: compositor running, interrupts enabled\n");
 
-    // event loop: drain input queues, redraw on change, clock every second
+    // event loop: drain input queues, drive animations, redraw on change,
+    // wake once per second so the menubar clock updates
     loop {
         unsafe { asm!("sti", options(nomem, nostack)) };
         wm::on_mouse();
         wm::on_key();
         net::poll(); // M6: poll the NIC (no interrupts)
+        if wm::animating() {
+            wm::mark_dirty(); // keep the frames coming while anything moves
+        }
         if wm::take_dirty() {
             wm::redraw();
         }
         let sec = pit::ticks() / 1000;
         if LAST_SEC.swap(sec, Ordering::Relaxed) != sec {
-            gui::draw_clock(sec);
+            wm::mark_dirty(); // redraw() paints the clock (blit_bg wipes it)
         }
         unsafe { asm!("hlt", options(nomem, nostack)) };
     }
