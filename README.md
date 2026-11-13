@@ -77,6 +77,16 @@ wsl -d Ubuntu-24.04 -u root -- bash -c "bash /root/build-test.sh"
 powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1"
 ```
 
+QEMU opens in a window (WSLg). Click into the window to capture the mouse,
+`Ctrl+Alt+G` releases it again. Under WSLg the `gtk` backend cannot grab
+the pointer, so the script uses `sdl`. If relative mouse motion still does
+not reach the guest, use the VNC fallback:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts\start-os-vnc.ps1"
+# then connect any VNC viewer to 127.0.0.1:5901
+```
+
 ## Roadmap
 
 - [x] **M1** Boot + gradient desktop with wordmark, menubar, dock (Rust)
