@@ -37,7 +37,9 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 │   ├── run-m4.sh             # M4 acceptance run: apps, drag, keys, themes, browser
 │   ├── debug-m4.sh           # short M4 debug run (strokes, drag, keys)
 │   ├── run-test.sh           # Windows wrapper for run-qemu.sh
-│   ├── start-os.sh/.ps1      # boot the OS live in a QEMU window
+│   ├── start-os.sh/.ps1      # boot the OS live in a QEMU window (fallback)
+│   ├── start-os-vnc.sh       # headless QEMU serving VNC on 127.0.0.1:5901
+│   ├── vnc-viewer.ps1        # own RFB client: viewer window on Windows
 │   └── wsl-setup.sh          # toolchain install (Rust, mtools, OVMF, ...)
 ├── docs/
 │   └── screenshots/          # QEMU screendumps
@@ -73,18 +75,26 @@ wsl -d Ubuntu-24.04 -u root -- bash -c "bash /root/build-test.sh"
 
 ## Run the OS live
 
+One command from Windows - build, boot, and the OS appears in its own window:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1"
 ```
 
-QEMU opens in a window (WSLg). Click into the window to capture the mouse,
-`Ctrl+Alt+G` releases it again. Under WSLg the `gtk` backend cannot grab
-the pointer, so the script uses `sdl`. If relative mouse motion still does
-not reach the guest, use the VNC fallback:
+- The ISO is rebuilt automatically when sources are newer (skip with `-NoBuild`).
+- QEMU runs **headless inside WSL** and serves VNC on `127.0.0.1:5901`.
+- The viewer is our own RFB client (`scripts\vnc-viewer.ps1`, C# via
+  `Add-Type`, no external dependencies): a scaled window showing the guest
+  framebuffer. Mouse and keyboard work reliably there, because VNC pointer
+  events are absolute and WSLg window capture is bypassed entirely.
+- `F11` toggles fullscreen, `Alt+F4` quits; closing the window stops QEMU.
+- `-Fullscreen` starts borderless maximized.
+
+Fallback for quick boot checks only (QEMU window via WSLg, mouse capture may
+not work under WSLg):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "scripts\start-os-vnc.ps1"
-# then connect any VNC viewer to 127.0.0.1:5901
+powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1" -Window
 ```
 
 ## Roadmap
