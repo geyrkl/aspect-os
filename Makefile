@@ -15,6 +15,7 @@ KERNEL_SRCS := kernel/main.rs kernel/gui.rs kernel/logo.rs kernel/wm.rs \
                kernel/pic.rs kernel/pit.rs \
                kernel/ps2.rs kernel/keyboard.rs kernel/mouse.rs \
                kernel/pci.rs kernel/ahci.rs kernel/fs.rs \
+               kernel/e1000.rs kernel/net.rs \
                kernel/pmm.rs kernel/kernel.ld
 
 all: $(BUILDDIR)/aspect-os.iso $(BUILDDIR)/aspect-data.img

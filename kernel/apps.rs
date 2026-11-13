@@ -235,9 +235,9 @@ fn files_draw(x: i32, y: i32, w: i32, h: i32) {
             draw_name(dx, sy, &F_FILES[folder][f], 2, 0xFFFFFFFF);
             sy += 26;
             gui::fill_rect(dx, sy, dw, 1, 0xFF33333E);
-            sy += 8;
+            sy += 10;
             if F_SRC == (folder * F_MAXF + f) as i32 {
-                draw_multiline_b(dx, sy, &F_TEXT[..F_TLEN], 1, 0xFFC0C0CA, dw);
+                draw_multiline_b(dx, sy, &F_TEXT[..F_TLEN], 2, 0xFFC0C0CA, dw);
             } else {
                 gui::draw_text(dx, sy, "...", 2, 0xFF8A8A96);
             }
@@ -291,7 +291,7 @@ const T_COLS: usize = 38;
 const T_ROWS: usize = 13;
 
 static mut T_BUF: [[u8; T_COLS]; T_ROWS] = [[0; T_COLS]; T_ROWS];
-static mut T_IN: [u8; 30] = [0; 30];
+static mut T_IN: [u8; T_COLS] = [0; T_COLS];
 static mut T_IN_LEN: usize = 0;
 static mut T_USED: usize = 0; // rows filled (scrolls when full)
 static mut CATB: [u8; 2048] = [0; 2048]; // CAT file content staging
@@ -370,7 +370,7 @@ fn term_exec(cmd: &[u8]) {
         term_push_str("HELP CLEAR ECHO VER");
         term_push_str("UPTIME MEM APPS ABOUT");
         term_push_str("LS CAT WRITE RM DF");
-    } else if eq("CLEAR") {
+        term_push_str("IP PING");    } else if eq("CLEAR") {
         term_clear();
     } else if eq("ECHO") {
         term_push(rest);
@@ -399,6 +399,10 @@ fn term_exec(cmd: &[u8]) {
         term_write(rest);
     } else if eq("RM") {
         term_rm(rest);
+    } else if eq("IP") {
+        term_ip();
+    } else if eq("PING") {
+        term_ping(rest);
     } else if ulen == 0 {
         // empty command: just a new prompt line
     } else {
@@ -618,6 +622,165 @@ fn term_rm(arg: &[u8]) {
     }
 }
 
+/// IP - show the network configuration
+fn term_ip() {
+    if !crate::net::ready() {
+        term_push_str("NO NETWORK HARDWARE");
+        return;
+    }
+    let mut buf = [0u8; 40];
+    let mut line = [0u8; 40];
+    unsafe {
+        // MAC
+        let mac = crate::e1000::mac();
+        let n = crate::net::mac_str(&mac, &mut buf);
+        line[0] = b'M';
+        line[1] = b'A';
+        line[2] = b'C';
+        line[3] = b':';
+        line[4] = b' ';
+        let mut L = 5;
+        for i in 0..n {
+            if L < 40 {
+                line[L] = buf[i];
+                L += 1;
+            }
+        }
+        term_push(&line[..L]);
+        // IP
+        let n = crate::net::ip_str(&crate::net::OUR_IP, &mut buf);
+        line[0] = b'I';
+        line[1] = b'P';
+        line[2] = b':';
+        line[3] = b' ';
+        L = 4;
+        for i in 0..n {
+            if L < 40 {
+                line[L] = buf[i];
+                L += 1;
+            }
+        }
+        term_push(&line[..L]);
+        // gateway
+        let n = crate::net::ip_str(&crate::net::GW_IP, &mut buf);
+        line[0] = b'G';
+        line[1] = b'W';
+        line[2] = b':';
+        line[3] = b' ';
+        L = 4;
+        for i in 0..n {
+            if L < 40 {
+                line[L] = buf[i];
+                L += 1;
+            }
+        }
+        term_push(&line[..L]);
+        let (rx, tx) = crate::net::stats();
+        // one line: "PACKETS RX n TX m"
+        line[0] = b'P';
+        line[1] = b'A';
+        line[2] = b'C';
+        line[3] = b'K';
+        line[4] = b'E';
+        line[5] = b'T';
+        line[6] = b'S';
+        line[7] = b' ';
+        line[8] = b'R';
+        line[9] = b'X';
+        line[10] = b' ';
+        let mut L = 11usize;
+        let mut put = |v: u32, tail: &[u8]| {
+            let mut d = [0u8; 10];
+            let mut n = 0usize;
+            let mut x = v;
+            loop {
+                d[n] = b'0' + (x % 10) as u8;
+                n += 1;
+                x /= 10;
+                if x == 0 {
+                    break;
+                }
+            }
+            while n > 0 {
+                n -= 1;
+                if L < 38 {
+                    line[L] = d[n];
+                    L += 1;
+                }
+            }
+            for &c in tail {
+                if L < 38 {
+                    line[L] = c;
+                    L += 1;
+                }
+            }
+        };
+        put(rx, b" TX ");
+        put(tx, b"");
+        term_push(&line[..L]);
+    }
+}
+
+/// PING [X.Y.Z.W] - send 4 ICMP echo requests (default: the gateway)
+fn term_ping(arg: &[u8]) {
+    if !crate::net::ready() {
+        term_push_str("NO NETWORK HARDWARE");
+        return;
+    }
+    // parse an optional dotted address
+    let mut target = crate::net::GW_IP;
+    let mut found = [0u8; 4];
+    let mut cur = 0usize;
+    let mut val = 0u32;
+    let mut digits = 0usize;
+    let mut any = false;
+    for &c in arg {
+        if c.is_ascii_digit() {
+            val = val * 10 + (c - b'0') as u32;
+            digits += 1;
+        } else if c == b'.' && digits > 0 && val <= 255 {
+            if cur < 4 {
+                found[cur] = val as u8;
+            }
+            cur += 1;
+            val = 0;
+            digits = 0;
+            any = true;
+        } else {
+            break;
+        }
+    }
+    if any && cur == 3 && digits > 0 && val <= 255 {
+        found[3] = val as u8;
+        target = found;
+    }
+    unsafe {
+        let mut tb = [0u8; 20];
+        let n = crate::net::ip_str(&target, &mut tb);
+        let mut head = [0u8; 24];
+        let mut h = 0usize;
+        for &b in b"PING " {
+            head[h] = b;
+            h += 1;
+        }
+        for i in 0..n {
+            head[h] = tb[i];
+            h += 1;
+        }
+        term_push(&head[..h]);
+        for _ in 0..4 {
+            match crate::net::ping_once(&target) {
+                Some(rtt) => {
+                    term_push_num("REPLY RTT ", rtt, " MS");
+                }
+                None => {
+                    term_push_str("TIMEOUT");
+                }
+            }
+        }
+    }
+}
+
 /// suffix for the LS summary: " X FILES"
 fn format_count(n: usize) -> &'static [u8] {
     match n {
@@ -663,7 +826,7 @@ fn terminal_key(code: u32) {
             256 => {
                 // Enter: execute and clear input
                 let n = T_IN_LEN;
-                let mut cmd = [0u8; 30];
+                let mut cmd = [0u8; T_COLS];
                 cmd[..n].copy_from_slice(&T_IN[..n]);
                 T_IN_LEN = 0;
                 term_exec(&cmd[..n]);
@@ -678,7 +841,7 @@ fn terminal_key(code: u32) {
                 T_IN_LEN = 0;
             }
             c if (32..126).contains(&c) => {
-                if T_IN_LEN < 30 {
+                if T_IN_LEN < T_IN.len() {
                     T_IN[T_IN_LEN] = c as u8;
                     T_IN_LEN += 1;
                 }

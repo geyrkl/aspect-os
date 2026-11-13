@@ -6,15 +6,26 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 
 #[panic_handler]
-fn panic(_i: &PanicInfo) -> ! {
+fn panic(i: &PanicInfo) -> ! {
+    serial::log("KERNEL PANIC: ");
+    if let Some(m) = i.message().as_str() {
+        serial::log(m);
+    } else if let Some(loc) = i.location() {
+        serial::log("at ");
+        serial::log(loc.file());
+        serial::log(":");
+        serial::log_num(loc.line() as usize);
+    }
+    serial::log("\nkernel halted\n");
     loop {
-        core::hint::spin_loop();
+        unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
     }
 }
 
 pub mod apps;
 pub mod ahci;
 pub mod bootinfo;
+pub mod e1000;
 pub mod font;
 pub mod fs;
 pub mod gdt;
@@ -24,6 +35,7 @@ pub mod io;
 pub mod keyboard;
 pub mod logo;
 pub mod mouse;
+pub mod net;
 pub mod pci;
 pub mod pic;
 pub mod pit;
@@ -132,6 +144,14 @@ fn kernel_main(bi: *const BootInfo) {
     apps::fs_populate();
     serial::log("fs lists ready\n");
 
+    // --- M6: network stack (own PCI scan + e1000 driver + ARP/IP/ICMP) ---
+    serial::log("M6: net init\n");
+    if net::init() {
+        serial::log("net ready\n");
+    } else {
+        serial::log("net: no network hardware\n");
+    }
+
     gui::init_cursor();
     serial::log("M4: compositor running, interrupts enabled\n");
 
@@ -140,6 +160,7 @@ fn kernel_main(bi: *const BootInfo) {
         unsafe { asm!("sti", options(nomem, nostack)) };
         wm::on_mouse();
         wm::on_key();
+        net::poll(); // M6: poll the NIC (no interrupts)
         if wm::take_dirty() {
             wm::redraw();
         }

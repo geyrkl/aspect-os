@@ -23,6 +23,13 @@ pub fn log(s: &str) {
     }
 }
 
+/// log raw bytes (debug helpers for non-UTF8 buffers)
+pub fn log_bytes(b: &[u8]) {
+    for &c in b {
+        putc(c);
+    }
+}
+
 pub fn log_num(v: usize) {
     let mut buf = [0u8; 20];
     let mut i = 20;

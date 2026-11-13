@@ -14,4 +14,5 @@ exec qemu-system-x86_64 \
   -device ich9-ahci,id=ahci0 \
   -drive file="/mnt/c/Klemens/Coding/Aspect OS/build/aspect-data.img",format=raw,if=none,id=aspfs \
   -device ide-hd,drive=aspfs,bus=ahci0.0 \
+  -nic user,model=e1000 \
   -display "$DISP"

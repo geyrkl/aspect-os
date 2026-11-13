@@ -283,7 +283,8 @@ fn find(dir: usize, name: &[u8]) -> (u32, usize) {
         let mut cur = DIRBLOCK[dir];
         while cur != 0 && rdb(cur, &mut blk) {
             for e in 0..32usize {
-                if entry_kind(&blk, e) == K_FREE {
+                // files only: never hand out directory entries as files
+                if entry_kind(&blk, e) != K_FILE {
                     continue;
                 }
                 let mut disk = [0u8; NAME_MAX];

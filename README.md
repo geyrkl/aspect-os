@@ -25,8 +25,10 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 │   ├── keyboard.rs           # scancode set 2 -> key codes (shift map, debounce)
 │   ├── mouse.rs              # 3-byte packets -> cursor deltas + buttons
 │   ├── pmm.rs                # bitmap physical memory allocator (4 KiB frames)
-│   ├── pci.rs                # own PCI config-space scan (finds AHCI, BAR5)
+│   ├── pci.rs                # own PCI config-space scan (finds AHCI + e1000 NIC)
 │   ├── ahci.rs               # own AHCI driver (DMA EXT read/write, polling)
+│   ├── e1000.rs              # own Intel e1000 NIC driver (TX/RX rings, polling)
+│   ├── net.rs                # own network stack: ARP, IPv4, ICMP (ping)
 │   ├── fs.rs                 # ASPFS: own file system (superblock/bitmap/dirs)
 │   ├── io.rs                 # port I/O (outb/inb/outl/inl)
 │   ├── logo.rs               # "ASPECT OS" wordmark as vector strokes
@@ -41,8 +43,10 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 │   ├── run-qemu.sh           # QEMU/OVMF test, screendumps via QMP
 │   ├── run-m4.sh             # M4 acceptance run: apps, drag, keys, themes, browser
 │   ├── run-m5.sh             # M5 acceptance run: real FS, terminal disk access, reboot persistence
+│   ├── run-m6.sh             # M6 acceptance run: IP info, ping the gateway, help
 │   ├── debug-m4.sh           # short M4 debug run (strokes, drag, keys)
 │   ├── debug-ahci.sh         # short AHCI trace run (QEMU trace:ahci* debugging)
+│   ├── debug-net.sh          # short network debug run (QEMU filter-dump pcap analysis)
 │   ├── run-test.sh           # Windows wrapper for run-qemu.sh
 │   ├── start-os.sh/.ps1      # boot the OS live in a QEMU window (fallback)
 │   ├── start-os-vnc.sh       # headless QEMU serving VNC on 127.0.0.1:5901
@@ -64,10 +68,11 @@ no GRUB, no foreign crates, no pre-made themes. Own UEFI bootloader, own
 | **Interrupts (M2)** | `gdt.rs` own GDT with far-return CS reload, `idt.rs` 32 exception stubs (global_asm, own register save) + IRQ0/1/12 dispatcher (IRQ1/12 push events into the WM queues), `pic.rs` 8259A remap to 32..47, `pit.rs` timer @ 1000 Hz |
 | **Input + memory (M3)** | `ps2.rs` 8042 init (translation off, scancode set 2, timeouts), `keyboard.rs` keymap + shift map + 20 ms make-code debounce, `mouse.rs` 3-byte packet parser (`Option` events only on completed packets), `pmm.rs` bitmap frame allocator fed by the UEFI memory map from the bootloader |
 | **Window manager (M4)** `wm.rs` | Window list with z-order by index (max 8), ring-buffer input queues (IRQ producer / main-loop consumer), raise on click, title-bar drag, red traffic light closes, dock launches apps, content clicks/moves/keys routed to the focused app, compositor pass: background -> windows (shadow, chrome, clipped content) -> cursor |
-| **Apps (M4)** `apps.rs` | Files (backed by ASPFS on disk: tabs + file list + detail pane loaded from disk), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about + disk commands ls/cat/write/rm/df), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About (via the menubar monogram) |
+| **Apps (M4)** `apps.rs` | Files (backed by ASPFS on disk: tabs + file list + detail pane loaded from disk), Terminal (13x38 text grid: help/clear/echo/ver/uptime/mem/apps/about + disk commands ls/cat/write/rm/df + network commands ip/ping), Calculator (i64 integer math, ERROR on /0), Paint (960x560 canvas, 8-color palette, brush strokes), Settings (4 themes, instant desktop regen), Browser (offline pages: HOME/ABOUT/MANUAL/404, URL bar), About (via the menubar monogram) |
 | **Disk (M5)** `pci.rs`/`ahci.rs` | Own PCI config-space scan (ports 0xCF8/0xCFC): finds the AHCI controller (class 0106), enables memory space + bus mastering, hands BAR5 to the driver. `ahci.rs`: HBA init (GHC.AE), first port with DET=3, command list + FIS receive + command table in frames from our own PMM, READ/WRITE DMA EXT (LBA48) with polling (no interrupts), DMA staging buffer in `.bss` |
 | **File system (M5)** `fs.rs` | **ASPFS**, the own format: 4 KiB blocks, block 0 superblock (magic `ASPFS`), block bitmap (cached in memory), chained directory blocks with 128-byte entries (kind/name/start/count/size), files as contiguous extents. Mount/list/read/write/delete/free, all writes go back to disk through the AHCI driver — files survive reboots |
 | **mkfs (M5)** `tools/mkfs.rs` | Host tool (plain Rust, no deps): formats `build/aspect-data.img` (16 MiB) with the ASPFS layout and the seed files (SYSTEM/USERS/GUEST folders); wired into `make all` |
+| **Network (M6)** `pci.rs`/`e1000.rs`/`net.rs` | The PCI scan also finds the NIC (class 0200) and hands its BAR0 to the driver. `e1000.rs`: own Intel e1000 (8254x) driver — TX/RX descriptor rings in `.bss` (direct DMA addresses, identity-mapped kernel), EEPROM MAC read, register polling (no NIC interrupts), descriptor-done (DD) handshake. `net.rs`: own stack — ARP (request/reply + cache), IPv4 (header build, checksum, routing through the gateway for off-subnet targets), ICMP echo (reply to requests, ping with per-packet RTT). Terminal commands `IP` (MAC/IP/GW/packet counters) and `PING [X.Y.Z.W]` (4 echo requests, default: the gateway). Panic handler logs to COM1 and halts instead of hanging silently |
 | **Build** | `rustc --target x86_64-unknown-uefi` -> `BOOTX64.EFI` (rust-lld); `rustc --target x86_64-unknown-none` -> ELF -> `objcopy` -> flat binary; ISO via mtools + xorriso |
 
 ## Build & Test (WSL Ubuntu-24.04)
@@ -95,6 +100,9 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1"
 - QEMU runs **headless inside WSL** and serves VNC on `127.0.0.1:5901`.
 - A real data disk (`build/aspect-data.img`, ASPFS, built by `make all`) is
   attached via QEMU's ich9-ahci — files created in the OS survive reboots.
+- Networking works out of the box: the VM gets an e1000 NIC on QEMU's
+  user-mode network (guest `10.0.2.15`, gateway `10.0.2.2`). Open the
+  Terminal and run `IP` or `PING [X.Y.Z.W]` (default target: the gateway).
 - The viewer is our own RFB client (`scripts\vnc-viewer.ps1`, C# via
   `Add-Type`, no external dependencies): a scaled window showing the guest
   framebuffer. Mouse and keyboard work reliably there, because VNC pointer
@@ -116,7 +124,7 @@ powershell -ExecutionPolicy Bypass -File "scripts\start-os.ps1" -Window
 - [x] **M3** Own drivers: PS/2 mouse + keyboard, own physical allocator
 - [x] **M4** Window compositor + apps: drag/focus/close, file manager, terminal, calculator, paint, settings (themes), offline browser, about
 - [x] **M5** Real file system: own PCI scan, own AHCI driver, own ASPFS format + mkfs tool; Files app and terminal read/write real, reboot-persistent files
-- [ ] **M6** Network stack, then real hardware (USB stick)
+- [x] **M6** Network stack (QEMU): own PCI NIC discovery, own e1000 driver, own ARP/IPv4/ICMP stack, `IP`/`PING` terminal commands; real hardware next (USB stick)
 
 ## License
 
