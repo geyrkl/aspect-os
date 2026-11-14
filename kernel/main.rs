@@ -170,7 +170,13 @@ fn kernel_main(bi: *const BootInfo) {
         }
         let sec = pit::ticks() / 1000;
         if LAST_SEC.swap(sec, Ordering::Relaxed) != sec {
-            wm::mark_dirty(); // redraw() paints the clock (blit_bg wipes it)
+            // idle path: only repaint the menubar clock region instead of a
+            // full frame (the background bar is baked without the clock)
+            if wm::animating() || wm::dirty() {
+                wm::mark_dirty();
+            } else {
+                gui::draw_clock(sec);
+            }
         }
         unsafe { asm!("hlt", options(nomem, nostack)) };
     }

@@ -156,6 +156,11 @@ pub fn mark_dirty() {
     }
 }
 
+/// is a repaint pending? (used for the clock-only idle update path)
+pub fn dirty() -> bool {
+    unsafe { DIRTY }
+}
+
 /// app-driven continuous animation (e.g. the music equalizer)
 pub fn anim_request(ms: u64) {
     unsafe {
@@ -342,7 +347,7 @@ fn dock_app(i: usize) -> AppId {
 // macOS-style menubar menus: monogram, app name, FILE, VIEW, WINDOW, HELP
 // =====================================================================
 
-const ACCENT: u32 = 0xFF3E5E8E; // menu highlight blue (matches Settings)
+const ACCENT: u32 = 0xFF3D6EB4; // macOS-style menu/control highlight blue
 const MENU_N: i32 = 6; // 0 monogram, 1 app, 2 FILE, 3 VIEW, 4 WINDOW, 5 HELP
 static mut MENU_OPEN: i32 = -1;
 static mut MENU_HOVER: i32 = -1; // item row under the cursor
@@ -585,13 +590,13 @@ fn draw_menu(m: i32) {
         } else {
             gui::draw_text(tx0, 7, menu_title(m), 2, 0xFFFFFFFF);
         }
-        // dropdown: shadow + panel
+        // dropdown: layered soft shadow + panel + lit top edge
         let (px, py, pw, _) = menu_panel(m);
         let py = py - off;
         let ph = n as i32 * 20 + 8;
-        gui::round_rect_blend(px - 8, py, pw + 16, ph + 12, 14, 0x000000, 120 * e >> 8);
+        gui::soft_shadow(px, py, pw, ph, 10, 90 * e >> 8);
         gui::round_rect_fill(px, py, pw, ph, 10, 0xFF1F1F26);
-        gui::round_rect_fill(px, py, pw, ph, 10, 0xFF1F1F26);
+        gui::round_rect_stroke(px, py, pw, ph, 10, 1, 0x3C3C46);
         gui::blend_rect(px + 3, py + 1, pw - 6, 1, 0xFFFFFF, 26);
         for r in 0..n {
             let iy = py + 3 + r as i32 * 20;
@@ -801,22 +806,31 @@ fn draw_win(focused: bool, w: Win, k: i32) {
         h: nh,
         birth: 0,
     };
-    // drop shadow (fades in with the pop)
+    // macOS-style soft drop shadow (fades in with the pop)
     let sh = (if focused { 110 } else { 70 }) * k >> 8;
-    gui::round_rect_blend(sw.x - 8, sw.y - 2, sw.w + 16, sw.h + 16, 18, 0x000000, sh);
+    gui::soft_shadow(sw.x, sw.y, sw.w, sw.h, 12, sh);
     // body
     gui::round_rect_fill(sw.x, sw.y, sw.w, sw.h, 12, 0xFF1B1B21);
     // title strip (kept inside the rounded top corners)
     gui::blend_rect(sw.x + 2, sw.y + 6, sw.w - 4, TITLE_H - 8, 0xFFFFFF,
                     if focused { 16 } else { 7 });
-    // traffic lights
+    // hairline under the title bar
+    gui::blend_rect(sw.x + 2, sw.y + TITLE_H, sw.w - 4, 1, 0x000000, 50);
+    // traffic lights: colored when focused, gray when not (macOS behavior)
     let ly = sw.y + TITLE_H / 2;
-    gui::circle_fill(sw.x + 18, ly, 5, 0xFFFF5F57);
-    gui::circle_fill(sw.x + 34, ly, 5, 0xFFFEBC2E);
-    gui::circle_fill(sw.x + 50, ly, 5, 0xFF28C840);
-    // hover the title bar: glyphs appear on the lights (close / minus / zoom)
+    if focused {
+        gui::circle_fill(sw.x + 18, ly, 5, 0xFFFF5F57);
+        gui::circle_fill(sw.x + 34, ly, 5, 0xFFFEBC2E);
+        gui::circle_fill(sw.x + 50, ly, 5, 0xFF28C840);
+    } else {
+        gui::circle_fill(sw.x + 18, ly, 5, 0xFF55555F);
+        gui::circle_fill(sw.x + 34, ly, 5, 0xFF55555F);
+        gui::circle_fill(sw.x + 50, ly, 5, 0xFF55555F);
+    }
+    // hover the focused title bar: glyphs appear on the lights
+    // (close / minus / zoom)
     let (mx, my) = gui::cursor_pos();
-    if mx >= sw.x && mx < sw.x + sw.w && my >= sw.y && my < sw.y + TITLE_H {
+    if focused && mx >= sw.x && mx < sw.x + sw.w && my >= sw.y && my < sw.y + TITLE_H {
         gui::draw_line_t(sw.x + 15, ly - 3, sw.x + 21, ly + 3, 2, 0xFF7A1210);
         gui::draw_line_t(sw.x + 15, ly + 3, sw.x + 21, ly - 3, 2, 0xFF7A1210);
         gui::fill_rect(sw.x + 30, ly, 8, 2, 0xFF9A6A00);
@@ -897,8 +911,8 @@ fn draw_menu_titles() {
     }
 }
 
-/// full-screen compositor pass: background, dock, windows back to front,
-/// close ghosts, menubar menus, cursor
+/// full-screen compositor pass: background, windows back to front, close
+/// ghosts, dock ABOVE the windows (macOS z-order), menus, cursor
 pub fn redraw() {
     unsafe {
         let now = pit::ticks();
@@ -906,9 +920,6 @@ pub fn redraw() {
         // the clock lives in the background bar: blit_bg wipes it, so it is
         // drawn every frame right after the background
         gui::draw_clock(now / 1000);
-        // the dock is dynamic: magnification, bounce, running dots
-        let (bounce, lift, run) = dock_anim();
-        gui::draw_dock(&MAG, bounce, lift, &run);
         for i in 0..N {
             if let Some(w) = WINS[i] {
                 draw_window(i == N - 1, w, now);
@@ -930,9 +941,12 @@ pub fn redraw() {
         for i in k..4 {
             GHOSTS[i] = None;
         }
+        // the dock floats above every window
+        let (bounce, lift, run) = dock_anim();
+        gui::draw_dock(&MAG, bounce, lift, &run);
         // macOS-style menubar titles live over the background bar
         draw_menu_titles();
-        // menus draw above every window; the cursor stays on top
+        // menus draw above everything; the cursor stays on top
         if MENU_OPEN >= 0 {
             draw_menu(MENU_OPEN);
         }

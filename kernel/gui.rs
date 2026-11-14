@@ -213,6 +213,37 @@ pub fn blend_rect(x0: i32, y0: i32, w: i32, h: i32, c: u32, a: i32) {
     }
 }
 
+/// bulk-copy a pixel rect from src (pitch spitch) into the current target,
+/// fully clipped - used for canvas blits (paint) instead of per-pixel pset
+pub fn blit_rect(src: &[u32], spitch: i32, dx: i32, dy: i32, w: i32, h: i32) {
+    unsafe {
+        let xa = clamp(dx, CL_X0, CL_X1 + 1);
+        let xb = clamp(dx + w - 1, CL_X0, CL_X1 + 1);
+        let ya = clamp(dy, CL_Y0, CL_Y1 + 1);
+        let yb = clamp(dy + h - 1, CL_Y0, CL_Y1 + 1);
+        let mut y = ya;
+        while y <= yb {
+            let sy = y - dy;
+            let srow = src.as_ptr().add((sy * spitch) as usize);
+            let drow = T.offset((y * TPPSL) as isize);
+            let mut x = xa - dx;
+            while x <= xb - dx {
+                *drow.offset((dx + x) as isize) = *srow.add(x as usize);
+                x += 1;
+            }
+            y += 1;
+        }
+    }
+}
+
+/// macOS-style soft drop shadow: three stacked translucent rounded rects
+/// (wide faint + mid + tight dark) read as one blurred shadow
+pub fn soft_shadow(x0: i32, y0: i32, w: i32, h: i32, r: i32, a: i32) {
+    round_rect_blend(x0 - 6, y0 - 4, w + 12, h + 16, r + 8, 0x000000, a * 30 / 100);
+    round_rect_blend(x0 - 3, y0 - 1, w + 6, h + 9, r + 4, 0x000000, a * 40 / 100);
+    round_rect_blend(x0, y0 + 2, w, h + 4, r, 0x000000, a * 50 / 100);
+}
+
 pub fn isqrt(n: u64) -> u64 {
     if n < 2 {
         return n;
@@ -661,8 +692,11 @@ pub fn dock_hit(cx: i32, cy: i32) -> i32 {
 pub fn draw_dock(mag: &[i32; DOCK_N], bounce: i32, lift: i32, running: &[bool; DOCK_N]) {
     dock_layout(mag);
     let (dpx, dpy, dpw, dph) = unsafe { D_PANEL };
-    round_rect_blend(dpx, dpy, dpw, dph, 18, 0x14141A, 125);
-    round_rect_stroke(dpx, dpy, dpw, dph, 18, 2, 0x3A3A46);
+    // translucent macOS dock pill: soft shadow, glassy body, lit top edge
+    soft_shadow(dpx + 4, dpy + 4, dpw - 8, dph - 6, 14, 60);
+    round_rect_blend(dpx, dpy, dpw, dph, 20, 0x101014, 105);
+    round_rect_stroke(dpx, dpy, dpw, dph, 20, 2, 0x46464F);
+    blend_rect(dpx + 6, dpy + 2, dpw - 12, 1, 0xFFFFFF, 26);
 
     let tops: [u32; DOCK_N] = [
         0xFF4C9AFF, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA,
@@ -751,9 +785,39 @@ pub fn draw_dock(mag: &[i32; DOCK_N], bounce: i32, lift: i32, running: &[bool; D
 // --- desktop background: render once, blit every frame ---
 // (the dock is NOT baked in: it is drawn per frame so it can magnify,
 // bounce and show running indicators)
+
+/// soft radial glow blob (wallpaper ambience, integer falloff)
+fn glow(cx: i32, cy: i32, r: i32, col: u32, alpha: i32) {
+    if r <= 0 {
+        return;
+    }
+    let r2 = (r * r) as u64;
+    for y in -r..=r {
+        let dy2 = (y * y) as u64;
+        for x in -r..=r {
+            let d2 = dy2 + (x * x) as u64;
+            if d2 <= r2 {
+                let fall = 255 - ((isqrt(d2) * 255) / r as u64) as i32;
+                let a = (alpha * fall * fall) >> 16;
+                if a > 0 {
+                    px_blend(cx + x, cy + y, col, a);
+                }
+            }
+        }
+    }
+}
+
 fn bg_render() {
     set_target_bg();
     draw_gradient();
+    // ambient glow blobs tinted from the theme corners (Sonoma-style depth)
+    unsafe {
+        let cols = THEME_COLS[THEME];
+        let lt = |c: u32, t: i32| mix(c, 0xFFFFFF, t);
+        glow(tw() * 82 / 100, th() * 18 / 100, th() / 3, lt(cols[1], 90), 85);
+        glow(tw() * 14 / 100, th() * 86 / 100, th() * 2 / 5, lt(cols[2], 55), 60);
+        glow(tw() * 55 / 100, th() * 58 / 100, th() / 4, lt(cols[3], 40), 35);
+    }
     draw_menubar();
     crate::logo::draw_wordmark(tw() / 2, th() * 40 / 100, 5);
     set_target_fb();
@@ -840,14 +904,28 @@ pub fn init_cursor() {
     }
 }
 
-/// draw the arrow at the current position into the current target (framebuffer)
+/// draw the arrow at the current position into the current target (framebuffer):
+/// white outline (mask dilated by 1 px) with the dark arrow on top, like macOS
 pub fn draw_cursor() {
     unsafe {
         let (x, y) = (CUR_X, CUR_Y);
+        // outline pass: stamp white around every arrow pixel
         for (ry, row) in CURSOR_SHAPE.iter().enumerate() {
             for rx in 0..CUR_W {
                 if row & (0x800 >> rx) != 0 {
-                    px(x + rx, y + ry as i32, 0xFF14141A); // dark arrow
+                    for oy in -1..=1 {
+                        for ox in -1..=1 {
+                            px(x + rx as i32 + ox, y + ry as i32 + oy, 0xFFF2F2F6);
+                        }
+                    }
+                }
+            }
+        }
+        // body pass on top
+        for (ry, row) in CURSOR_SHAPE.iter().enumerate() {
+            for rx in 0..CUR_W {
+                if row & (0x800 >> rx) != 0 {
+                    px(x + rx as i32, y + ry as i32, 0xFF14141A); // dark arrow
                 }
             }
         }

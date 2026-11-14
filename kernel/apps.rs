@@ -224,7 +224,7 @@ fn files_draw(x: i32, y: i32, w: i32, h: i32) {
             let ry = y + 50 + i as i32 * 26;
             let sel = F_SEL == i as i32;
             if sel {
-                gui::fill_rect(x + 12, ry - 3, 160, 22, 0xFF3E5E8E);
+                gui::fill_rect(x + 12, ry - 3, 160, 22, 0xFF3D6EB4);
             }
             draw_name(x + 18, ry, &F_FILES[folder][i], 2, if sel { 0xFFFFFFFF } else { 0xFFB0B0BC });
         }
@@ -385,7 +385,7 @@ fn term_exec(cmd: &[u8]) {
     } else if eq("ECHO") {
         term_push(rest);
     } else if eq("VER") {
-        term_push_str("ASPECT OS 0.5.0 M5");
+        term_push_str("ASPECT OS 0.6.0 M9");
     } else if eq("UPTIME") {
         term_push_num("UP ", pit::ticks() / 1000, " SECONDS");
     } else if eq("MEM") {
@@ -448,6 +448,7 @@ fn term_path(arg: &[u8]) -> Option<(usize, usize)> {
     if slash == arg.len() {
         return None;
     }
+    let slash = slash.min(62); // up[] holds at most 62 bytes
     let dirname = &up[..slash];
     let filename = slash + 1; // index into `arg` (original case)
     if filename >= arg.len() {
@@ -1005,7 +1006,7 @@ fn calc_draw(x: i32, y: i32, w: i32, h: i32) {
             let bgc = if k == b'C' {
                 0xFF7A2E38
             } else if accent {
-                0xFF3E5E8E
+                0xFF3D6EB4
             } else {
                 0xFF2E2E38
             };
@@ -1080,14 +1081,9 @@ fn paint_in_canvas(lx: i32, ly: i32) -> bool {
 
 fn paint_draw(x: i32, y: i32, w: i32, h: i32) {
     gui::fill_rect(x, y, w, h, 0xFF23232B);
-    // canvas (1:1 blit, clipped by the window)
+    // canvas blit (1:1, clipped by the window clip; bulk rows, not per-pixel)
     unsafe {
-        for cy in 0..CANVAS_H {
-            let row = cy as usize * CANVAS_W as usize;
-            for cx in 0..CANVAS_W {
-                gui::pset(x + CANVAS_OX + cx, y + CANVAS_OY + cy, CANVAS[row + cx as usize]);
-            }
-        }
+        gui::blit_rect(&CANVAS, CANVAS_W, x + CANVAS_OX, y + CANVAS_OY, CANVAS_W, CANVAS_H);
     }
     // palette
     let py = y + CANVAS_OY + CANVAS_H + 10;
@@ -1167,7 +1163,7 @@ fn settings_draw(x: i32, y: i32, w: i32, h: i32) {
         let ry = y + 66 + i as i32 * 52;
         let sel = gui::theme() == i;
         if sel {
-            gui::fill_rect(x + 10, ry - 4, w - 20, 44, 0xFF3E5E8E);
+            gui::fill_rect(x + 10, ry - 4, w - 20, 44, 0xFF3D6EB4);
         }
         // swatch: preview from the theme gradient at this screen position
         gui::fill_rect(x + 18, ry + 4, 32, 16, gui::gradient_color(x + 18, ry + 4));
@@ -1357,7 +1353,7 @@ fn about_draw(x: i32, y: i32, w: i32, h: i32) {
     gui::draw_line_t(x + 52, y + 20, x + 74, y + 78, 5, 0xFFF5A8E8);
     gui::draw_line_t(x + 38, y + 58, x + 66, y + 58, 5, 0xFFFFFFFF);
     gui::draw_text(x + 104, y + 28, "ASPECT OS", 5, 0xFFFFFFFF);
-    gui::draw_text(x + 104, y + 76, "VERSION 0.5 - AQUA", 2, 0xFF9A9AA6);
+    gui::draw_text(x + 104, y + 76, "VERSION 0.6 - AQUA", 2, 0xFF9A9AA6);
     gui::fill_rect(x + 24, y + 120, w - 48, 1, 0xFF33333E);
     draw_multiline(x + 24, y + 136,
         "WINDOW COMPOSITOR WITH DRAG,\nFOCUS, TRAFFIC LIGHTS AND\nMENUBAR MENUS.\n\nFILES, TERMINAL, PAINT, NOTES,\nMUSIC, BROWSER, SETTINGS.\n\nOPEN/CLOSE + DOCK ANIMATIONS.\n100% OWN RUST CODE.", 2, 0xFFC0C0CA, w - 48);
@@ -1461,7 +1457,7 @@ fn notes_draw(x: i32, y: i32, w: i32, h: i32) {
             let ry = y + 40 + i as i32 * 26;
             let sel = i == NT_SEL;
             if sel {
-                gui::round_rect_fill(x + 6, ry - 4, sw - 12, 22, 6, 0xFF3E5E8E);
+                gui::round_rect_fill(x + 6, ry - 4, sw - 12, 22, 6, 0xFF3D6EB4);
             }
             let b = &NT_BUF[i][..NT_LEN[i]];
             let mut end = b.len();
@@ -1673,7 +1669,7 @@ fn music_draw(x: i32, y: i32, w: i32, h: i32) {
             let ry = y + 100 + i as i32 * 30;
             let sel = i == t;
             if sel {
-                gui::round_rect_fill(x + 184, ry - 5, w - 208, 24, 6, 0xFF3E5E8E);
+                gui::round_rect_fill(x + 184, ry - 5, w - 208, 24, 6, 0xFF3D6EB4);
             }
             gui::draw_text(x + 196, ry, MU_TITLES[i], 2,
                            if sel { 0xFFFFFFFF } else { 0xFFB0B0BC });
@@ -1689,7 +1685,7 @@ fn music_draw(x: i32, y: i32, w: i32, h: i32) {
         gui::round_rect_fill(x + 24, py, w - 48, 6, 3, 0xFF16161C);
         let fill = ((w - 48) as u64 * el / MU_SECS[t]) as i32;
         if fill > 6 {
-            gui::round_rect_fill(x + 24, py, fill, 6, 3, 0xFF3E5E8E);
+            gui::round_rect_fill(x + 24, py, fill, 6, 3, 0xFF3D6EB4);
         }
         gui::circle_fill(x + 24 + fill, py + 3, 6, 0xFFE8E8EC);
         let mut tb = [0u8; 8];
@@ -1705,7 +1701,7 @@ fn music_draw(x: i32, y: i32, w: i32, h: i32) {
         let cx0 = x + w / 2;
         let cy0 = y + 254;
         gui::circle_fill(cx0 - 56, cy0, 18, 0xFF2A2A34);
-        gui::circle_fill(cx0, cy0, 22, 0xFF3E5E8E);
+        gui::circle_fill(cx0, cy0, 22, 0xFF3D6EB4);
         gui::circle_fill(cx0 + 56, cy0, 18, 0xFF2A2A34);
         // prev: bar + left-pointing triangle
         gui::fill_rect(cx0 - 64, cy0 - 6, 3, 12, 0xFFFFFFFF);
@@ -1736,7 +1732,7 @@ fn music_draw(x: i32, y: i32, w: i32, h: i32) {
             } else {
                 4
             };
-            let col = gui::mix(0xFF3E5E8E, 0xFF8AB4FF, (i * 255 / n) as i32);
+            let col = gui::mix(0xFF3D6EB4, 0xFF8AB4FF, (i * 255 / n) as i32);
             gui::fill_rect(bx, by - ht, 8, ht, col);
         }
         if MU_PLAY {
