@@ -211,7 +211,6 @@ public class Viewer : Form {
     Client c;
     Canvas cv;
     Bitmap bmp;
-    object lck = new object();
     Thread rd;
     volatile bool run = true;
     int btns = 0;
@@ -229,8 +228,18 @@ public class Viewer : Form {
         SYM[Keys.Delete] = 0xFFFF; SYM[Keys.Insert] = 0xFF63;
     }
 
+    static readonly string LogPath = System.IO.Path.Combine(
+        System.IO.Path.GetTempPath(), "aspect-viewer.log");
+    public static void Log(string msg) {
+        try {
+            System.IO.File.AppendAllText(LogPath,
+                DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + "\r\n");
+        } catch (Exception) { }
+    }
+
     public Viewer(string host, int port, bool fullscreen) {
         FillSym();
+        Log("viewer ctor");
         Text = "ASPECT OS (F11 = fullscreen, Alt+F4 = quit)";
         KeyPreview = true;
         StartPosition = FormStartPosition.CenterScreen;
@@ -259,9 +268,15 @@ public class Viewer : Form {
         FormClosed += OnClosed2;
 
         c.Request(false, 0, 0, c.W, c.H);
+        Log("connected " + c.W + "x" + c.H);
         rd = new Thread(Reader);
         rd.IsBackground = true;
         rd.Start();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e) {
+        Log("form closing: " + e.CloseReason.ToString());
+        base.OnFormClosing(e);
     }
 
     void ToggleFull() {
@@ -280,9 +295,13 @@ public class Viewer : Form {
 
     void Reader() {
         try {
+            Log("reader started");
             while (run) {
                 Client.Update[] us = c.ReadUpdate();
-                lock (lck) {
+                // same lock as Canvas.OnPaint: DrawImage and LockBits must
+                // never touch the bitmap at the same time (GDI+ throws
+                // "object is in use elsewhere" and the window would close)
+                lock (cv.Lck) {
                     for (int i = 0; i < us.Length; i++) Blit(us[i]);
                 }
                 try { cv.BeginInvoke((MethodInvoker)delegate { cv.Invalidate(); }); }
@@ -290,7 +309,9 @@ public class Viewer : Form {
                 catch (InvalidOperationException) { break; }
                 c.Request(true, 0, 0, c.W, c.H);
             }
-        } catch (Exception) {
+            Log("reader loop ended normally");
+        } catch (Exception ex) {
+            Log("reader exception: " + ex.ToString());
             if (run) {
                 run = false;
                 try { BeginInvoke((MethodInvoker)delegate { Close(); }); } catch (Exception) { }
@@ -419,11 +440,14 @@ public static class App {
 
     public static int Run(string host, int port, bool fullscreen, string test) {
         try {
+            Viewer.Log("app run start (test=" + (test == null ? "" : test) + ")");
             if (test != null && test.Length > 0) return TestFrame(host, port, test);
             Application.EnableVisualStyles();
             Application.Run(new Viewer(host, port, fullscreen));
+            Viewer.Log("application run returned");
             return 0;
         } catch (Exception ex) {
+            Viewer.Log("app exception: " + ex.ToString());
             Console.Error.WriteLine("vnc-viewer: " + ex.Message);
             try { MessageBox.Show(ex.Message, "ASPECT OS viewer"); } catch (Exception) { }
             return 1;
