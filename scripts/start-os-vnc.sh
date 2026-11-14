@@ -5,11 +5,13 @@ CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 VARS=/tmp/aspect-os-vars.fd
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$VARS" 2>/dev/null || cp "$VARS" "$VARS"
 
-# stop a previous instance
+# stop a previous instance (own pidfile, plus any stale ASPECT qemu that
+# still holds the write lock on aspect-data.img)
 if [ -f /tmp/aspect-os.pid ]; then
   kill "$(cat /tmp/aspect-os.pid)" 2>/dev/null || true
   sleep 1
 fi
+pkill -f "qemu-system-x86_64.*aspect-os.iso" 2>/dev/null && sleep 1 || true
 
 qemu-system-x86_64 \
   -enable-kvm -m 2048 -cpu host -smp 2 \

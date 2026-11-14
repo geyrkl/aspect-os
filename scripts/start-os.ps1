@@ -25,24 +25,23 @@ if (-not $NoBuild) {
     $stale = (-not (Test-Path $iso)) -or ($newest -and $newest.LastWriteTime -gt (Get-Item $iso).LastWriteTime)
     if ($stale) {
         Write-Host "[build] (re)building aspect-os.iso ..."
-        $bs = (Get-Content -Raw "$PSScriptRoot\build.sh") -replace "`r", ""
-        $bs | Set-Content -NoNewline -Encoding ASCII "\\wsl.localhost\Ubuntu-24.04\root\build-aspect.sh"
-        wsl -d Ubuntu-24.04 -u root -- bash /root/build-aspect.sh
+        # pipe build.sh from /mnt/c and strip CR; no /tmp copies (they do not
+        # survive a WSL restart and \\wsl.localhost writes can race boot-up)
+        $wslrepo = "/mnt/c/" + ($repo -replace '^[A-Za-z]:\\', '' -replace '\\', '/')
+        wsl -d Ubuntu-24.04 -u root -- bash -c "sed 's/\r$//' '$wslrepo/scripts/build.sh' | bash"
         if (-not (Test-Path $iso)) { throw "build failed - build/aspect-os.iso missing" }
     }
 }
 
 if ($Window) {
-    $ss = (Get-Content -Raw "$PSScriptRoot\start-os.sh") -replace "`r", ""
-    $ss | Set-Content -NoNewline -Encoding ASCII "\\wsl.localhost\Ubuntu-24.04\tmp\start-os.sh"
-    wsl -d Ubuntu-24.04 -u root -- bash /tmp/start-os.sh
+    $wslrepo = "/mnt/c/" + ($repo -replace '^[A-Za-z]:\\', '' -replace '\\', '/')
+    wsl -d Ubuntu-24.04 -u root -- bash -c "sed 's/\r$//' '$wslrepo/scripts/start-os.sh' | bash"
     return
 }
 
 # --- headless QEMU with VNC ---
-$vs = (Get-Content -Raw "$PSScriptRoot\start-os-vnc.sh") -replace "`r", ""
-$vs | Set-Content -NoNewline -Encoding ASCII "\\wsl.localhost\Ubuntu-24.04\tmp\start-os-vnc.sh"
-wsl -d Ubuntu-24.04 -u root -- bash /tmp/start-os-vnc.sh
+$wslrepo = "/mnt/c/" + ($repo -replace '^[A-Za-z]:\\', '' -replace '\\', '/')
+wsl -d Ubuntu-24.04 -u root -- bash -c "sed 's/\r$//' '$wslrepo/scripts/start-os-vnc.sh' | bash"
 
 # --- wait for the VNC port (WSL2 forwards localhost to Windows) ---
 $open = $false
