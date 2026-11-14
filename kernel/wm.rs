@@ -20,6 +20,12 @@ pub struct Win {
     pub w: i32,
     pub h: i32,
     pub birth: u64, // tick the window opened (open animation)
+    pub min: bool,  // minimized to the dock (hidden, still running)
+    pub zoom: bool, // zoomed (green light) to the work area
+    pub rx: i32,    // restored rect (geometry before the zoom)
+    pub ry: i32,
+    pub rw: i32,
+    pub rh: i32,
 }
 
 // z-order: index 0 = back, index N-1 = front (focused)
@@ -110,8 +116,26 @@ fn pop_key() -> Option<u32> {
 // ---- interactive state (main loop only) ----
 static mut HELD: bool = false; // left button held
 static mut DRAG: usize = NO_DRAG; // index of the dragged window
+static mut DRAG_RESIZE: bool = false; // dragging the resize grip
 static mut GRABX: i32 = 0;
 static mut GRABY: i32 = 0;
+static mut LAST_DBL: (u64, usize) = (0, usize::MAX); // title double-click (tick, index)
+
+const GRIP: i32 = 18; // size of the bottom-right resize grip zone
+
+/// index of the topmost visible (non-minimized) window; usize::MAX = none
+unsafe fn focus_idx() -> usize {
+    let mut i = N;
+    while i > 0 {
+        i -= 1;
+        if let Some(w) = WINS[i] {
+            if !w.min {
+                return i;
+            }
+        }
+    }
+    usize::MAX
+}
 
 #[inline]
 fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
@@ -233,6 +257,8 @@ pub fn init() {
         DIRTY = false;
         HELD = false;
         DRAG = NO_DRAG;
+        DRAG_RESIZE = false;
+        LAST_DBL = (0, usize::MAX);
         MENU_T0 = 0;
         GHOSTS = [None; 4];
         MAG = [0; 8];
@@ -302,12 +328,19 @@ fn close(i: usize) {
     }
 }
 
-/// open an app window (or raise the existing one)
+/// open an app window; clicking the dock on a running app raises it, on a
+/// minimized app it restores (with the pop-in animation)
 pub fn open(app: AppId) {
     unsafe {
         for i in 0..N {
-            if let Some(w) = WINS[i] {
+            if let Some(mut w) = WINS[i] {
                 if w.app == app {
+                    let was_min = w.min;
+                    w.min = false;
+                    if was_min {
+                        w.birth = pit::ticks(); // pop back in
+                    }
+                    WINS[i] = Some(w);
                     raise(i);
                     return;
                 }
@@ -323,10 +356,69 @@ pub fn open(app: AppId) {
         let k = N as i32;
         let x = (96 + 40 * (k % 6)).min(sw - w - 8).max(8);
         let y = (64 + 40 * (k % 6)).max(MIN_Y).min(sh - h - 8);
-        WINS[N] = Some(Win { app, x, y, w, h, birth: pit::ticks() });
+        WINS[N] = Some(Win {
+            app, x, y, w, h,
+            birth: pit::ticks(),
+            min: false,
+            zoom: false,
+            rx: x, ry: y, rw: w, rh: h,
+        });
         N += 1;
         apps::on_open(app);
         DIRTY = true;
+    }
+}
+
+/// minimize window i (yellow light): hide it, keep it running, and leave
+/// a shrinking ghost so the eye follows where it went
+fn minimize(i: usize) {
+    unsafe {
+        if let Some(mut w) = WINS[i] {
+            w.min = true;
+            w.zoom = false;
+            WINS[i] = Some(w);
+            DRAG = NO_DRAG;
+            DRAG_RESIZE = false;
+            // shrink away like a close ghost
+            let mut s = 0;
+            while s < 4 && GHOSTS[s].is_some() {
+                s += 1;
+            }
+            if s == 4 {
+                s = 0;
+            }
+            GHOSTS[s] = Some((w, pit::ticks()));
+            DIRTY = true;
+        }
+    }
+}
+
+/// toggle the zoom (green light): full work area <-> restored geometry
+fn zoom_toggle(i: usize) {
+    unsafe {
+        if let Some(mut w) = WINS[i] {
+            if w.zoom {
+                w.x = w.rx;
+                w.y = w.ry;
+                w.w = w.rw;
+                w.h = w.rh;
+                w.zoom = false;
+            } else {
+                let (sw, sh) = (gui::width(), gui::height());
+                w.rx = w.x;
+                w.ry = w.y;
+                w.rw = w.w;
+                w.rh = w.h;
+                w.zoom = true;
+                w.x = 0;
+                w.y = MIN_Y;
+                w.w = sw;
+                w.h = sh - MIN_Y - 88; // stop above the dock
+            }
+            DRAG_RESIZE = false;
+            WINS[i] = Some(w);
+            DIRTY = true;
+        }
     }
 }
 
@@ -356,8 +448,9 @@ static mut MENU_HOVER: i32 = -1; // item row under the cursor
 /// no window is open)
 fn app_menu_name() -> &'static str {
     unsafe {
-        if N > 0 {
-            if let Some(w) = WINS[N - 1] {
+        let f = focus_idx();
+        if f != usize::MAX {
+            if let Some(w) = WINS[f] {
                 return apps::title(w.app);
             }
         }
@@ -408,7 +501,7 @@ fn menu_len(m: i32) -> usize {
         1 => unsafe { if N > 0 { 1 } else { 0 } },
         2 => 8, // six app opens | CLOSE WINDOW
         3 => 4, // themes
-        4 => unsafe { N },
+        4 => unsafe { N + 3 }, // window list | MINIMIZE | ZOOM
         5 => 1, // OPEN MANUAL
         _ => 0,
     }
@@ -438,9 +531,17 @@ fn menu_label(m: i32, r: usize) -> Option<&'static str> {
         },
         3 => Some(gui::theme_name(r)),
         4 => unsafe {
-            match WINS[r] {
-                Some(w) => Some(apps::title(w.app)),
-                None => None,
+            if r < N {
+                match WINS[r] {
+                    Some(w) => Some(apps::title(w.app)),
+                    None => None,
+                }
+            } else if r == N + 1 {
+                Some("MINIMIZE")
+            } else if r == N + 2 {
+                Some("ZOOM")
+            } else {
+                None // separator row
             }
         },
         5 => Some("OPEN MANUAL"),
@@ -452,7 +553,8 @@ fn menu_label(m: i32, r: usize) -> Option<&'static str> {
 fn menu_checked(m: i32, r: usize) -> bool {
     match m {
         3 => gui::theme() == r,
-        4 => unsafe { r + 1 == N },
+        // the focused, visible window carries the check mark
+        4 => unsafe { r + 1 == N && WINS[r].map_or(false, |w| !w.min) },
         _ => false,
     }
 }
@@ -490,7 +592,29 @@ fn run_item(m: i32, r: usize) {
             gui::set_theme(r);
             gui::bg_regen();
         }
-        4 => unsafe { raise(r); },
+        4 => unsafe {
+            if r < N {
+                // picking a window restores it if minimized and raises it
+                if let Some(mut w) = WINS[r] {
+                    if w.min {
+                        w.min = false;
+                        w.birth = pit::ticks();
+                        WINS[r] = Some(w);
+                    }
+                }
+                raise(r);
+            } else if r == N + 1 {
+                let f = focus_idx();
+                if f != usize::MAX {
+                    minimize(f);
+                }
+            } else if r == N + 2 {
+                let f = focus_idx();
+                if f != usize::MAX {
+                    zoom_toggle(f);
+                }
+            }
+        },
         5 => {
             open(AppId::Browser);
             apps::show_manual(); // after open: on_open resets the page
@@ -662,13 +786,13 @@ fn press(cx: i32, cy: i32) {
             DIRTY = true;
             return;
         }
-        // windows front to back
+        // windows front to back (minimized windows are invisible: skip them)
         let mut i = N;
         while i > 0 {
             i -= 1;
             let w = match WINS[i] {
-                Some(w) => w,
-                None => continue,
+                Some(w) if !w.min => w,
+                _ => continue,
             };
             // traffic lights (title bar, left side)
             if cy >= w.y && cy < w.y + TITLE_H && cx >= w.x + 10 && cx < w.x + 58 {
@@ -677,15 +801,38 @@ fn press(cx: i32, cy: i32) {
                     close(i);
                     return;
                 }
-                if hit(w.x + 34) || hit(w.x + 50) {
-                    return; // yellow/green are decorative for now
+                if hit(w.x + 34) {
+                    minimize(i);
+                    return;
                 }
+                if hit(w.x + 50) {
+                    zoom_toggle(i);
+                    return;
+                }
+            }
+            // resize grip: bottom-right corner
+            if cx >= w.x + w.w - GRIP && cx < w.x + w.w && cy >= w.y + w.h - GRIP && cy < w.y + w.h {
+                let ni = raise(i);
+                DRAG = ni;
+                DRAG_RESIZE = true;
+                GRABX = cx;
+                GRABY = cy;
+                LAST_DBL = (0, usize::MAX);
+                return;
             }
             if cx >= w.x && cx < w.x + w.w && cy >= w.y && cy < w.y + w.h {
                 let ni = raise(i);
-                let w = WINS[ni].unwrap();
                 if cy < w.y + TITLE_H {
+                    // double click on the title bar toggles the zoom
+                    let now = pit::ticks();
+                    if LAST_DBL.1 == i && now.wrapping_sub(LAST_DBL.0) < 400 {
+                        LAST_DBL = (0, usize::MAX);
+                        zoom_toggle(ni);
+                        return;
+                    }
+                    LAST_DBL = (now, ni); // post-raise index, matches the next press
                     DRAG = ni;
+                    DRAG_RESIZE = false;
                     GRABX = cx - w.x;
                     GRABY = cy - w.y;
                 } else {
@@ -710,10 +857,14 @@ fn press(cx: i32, cy: i32) {
 /// route a held-button move to the focused window's app (e.g. paint strokes)
 fn route_move(cx: i32, cy: i32) {
     unsafe {
-        if N == 0 || DRAG != NO_DRAG {
+        if DRAG != NO_DRAG {
             return;
         }
-        let w = match WINS[N - 1] {
+        let f = focus_idx();
+        if f == usize::MAX {
+            return;
+        }
+        let w = match WINS[f] {
             Some(w) => w,
             None => return,
         };
@@ -744,12 +895,31 @@ pub fn on_mouse() {
         } else if held {
             unsafe {
                 if DRAG != NO_DRAG {
-                    // drag the window by the grab point
-                    if let Some(w) = WINS[DRAG] {
-                        let mut w = w;
+                    if DRAG_RESIZE {
+                        // grow/shrink by the grip; clamped to the app's
+                        // minimum size and the screen edges
+                        if let Some(mut w) = WINS[DRAG] {
+                            let (sw, sh) = (gui::width(), gui::height());
+                            let (mw, mh) = apps::min_size(w.app);
+                            let nw = clamp(cx - w.x + 4, mw, sw - w.x - 4);
+                            let nh = clamp(cy - w.y + 4, mh, sh - w.y - 4);
+                            if nw != w.w || nh != w.h {
+                                w.w = nw;
+                                w.h = nh;
+                                w.zoom = false; // resizing un-zooms
+                                WINS[DRAG] = Some(w);
+                                DIRTY = true;
+                            }
+                        }
+                    } else if let Some(mut w) = WINS[DRAG] {
                         let (sw, sh) = (gui::width(), gui::height());
                         w.x = clamp(w.x + ev.dx, 0, sw - w.w);
                         w.y = clamp(w.y + ev.dy, MIN_Y, sh - w.h - 4);
+                        if w.zoom {
+                            // dragging a zoomed window keeps its size but
+                            // drops the zoom state
+                            w.zoom = false;
+                        }
                         WINS[DRAG] = Some(w);
                         DIRTY = true;
                     }
@@ -759,6 +929,7 @@ pub fn on_mouse() {
         if !held {
             unsafe {
                 DRAG = NO_DRAG;
+                DRAG_RESIZE = false;
             }
         }
         unsafe {
@@ -784,7 +955,11 @@ pub fn on_key() {
             if N == 0 {
                 continue;
             }
-            let w = match WINS[N - 1] {
+            let f = focus_idx();
+            if f == usize::MAX {
+                continue;
+            }
+            let w = match WINS[f] {
                 Some(w) => w,
                 None => continue,
             };
@@ -805,6 +980,9 @@ fn draw_win(focused: bool, w: Win, k: i32) {
         w: nw,
         h: nh,
         birth: 0,
+        min: false,
+        zoom: false,
+        rx: 0, ry: 0, rw: 0, rh: 0,
     };
     // macOS-style soft drop shadow (fades in with the pop)
     let sh = (if focused { 110 } else { 70 }) * k >> 8;
@@ -840,6 +1018,14 @@ fn draw_win(focused: bool, w: Win, k: i32) {
     let name = apps::title(w.app);
     let tw = gui::text_w(name, 2);
     gui::draw_text(sw.x + (sw.w - tw) / 2, sw.y + 8, name, 2, 0xFFC8C8D0);
+    // resize grip: diagonal hatch in the bottom-right corner
+    if sw.w > 60 && sw.h > 60 {
+        for k in 0..3 {
+            let gx = sw.x + sw.w - 22 + k * 5;
+            let gy = sw.y + sw.h - 10;
+            gui::draw_line_t(gx, gy, gx + 6, gy - 6, 2, 0x45454F);
+        }
+    }
     // content (clipped)
     let (cx, cy, cw, ch) = content_rect(sw);
     gui::set_clip(cx, cy, cw, ch);
@@ -920,9 +1106,13 @@ pub fn redraw() {
         // the clock lives in the background bar: blit_bg wipes it, so it is
         // drawn every frame right after the background
         gui::draw_clock(now / 1000);
+        // focus = topmost visible window (minimized windows are skipped)
+        let f = focus_idx();
         for i in 0..N {
             if let Some(w) = WINS[i] {
-                draw_window(i == N - 1, w, now);
+                if !w.min {
+                    draw_window(i == f, w, now);
+                }
             }
         }
         // closing ghosts shrink away on top of the live windows

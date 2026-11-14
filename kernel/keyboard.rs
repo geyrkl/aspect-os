@@ -9,6 +9,10 @@ static EXTENDED: AtomicBool = AtomicBool::new(false);
 pub const K_ENTER: u32 = 256;
 pub const K_BACKSPACE: u32 = 257;
 pub const K_ESCAPE: u32 = 258;
+pub const K_UP: u32 = 259;
+pub const K_DOWN: u32 = 260;
+pub const K_LEFT: u32 = 261;
+pub const K_RIGHT: u32 = 262;
 
 // scancode set 2 make codes -> ASCII (lowercase base mapping)
 const KEYMAP: [(u8, u8); 51] = [
@@ -89,17 +93,27 @@ static mut LAST_TICKS: u64 = 0;
 pub unsafe fn handle() -> u32 {
     let sc = inb(0x60);
 
-    // E0 prefix: extended keys (arrows etc.) -> ignore for now
+    let make = sc & 0x7F;
+    let press = sc & 0x80 == 0;
+
+    // E0 prefix: extended keys (arrows etc.)
     if sc == 0xE0 {
         EXTENDED.store(true, Ordering::Relaxed);
         return 0;
     }
     if EXTENDED.swap(false, Ordering::Relaxed) {
-        return 0;
+        if !press {
+            return 0;
+        }
+        // translated extended make codes (scancode set 1 style)
+        return match make {
+            0x48 => K_UP,
+            0x50 => K_DOWN,
+            0x4B => K_LEFT,
+            0x4D => K_RIGHT,
+            _ => 0,
+        };
     }
-
-    let make = sc & 0x7F;
-    let press = sc & 0x80 == 0;
 
     if make == 0x12 || make == 0x59 {
         SHIFT.store(press, Ordering::Relaxed);

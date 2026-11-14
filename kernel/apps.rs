@@ -48,11 +48,27 @@ pub fn default_size(app: AppId) -> (i32, i32) {
     }
 }
 
+/// smallest window the app stays usable at (resize clamp)
+pub fn min_size(app: AppId) -> (i32, i32) {
+    match app {
+        AppId::Terminal => (420, 280),
+        AppId::Calc => (260, 340),
+        AppId::Paint => (560, 420),
+        AppId::Browser => (460, 320),
+        AppId::Notes => (480, 300),
+        AppId::Music => (440, 340),
+        AppId::Files => (340, 240),
+        _ => (280, 200),
+    }
+}
+
 pub fn init() {
     unsafe {
         F_FOLDER = 0;
         F_SEL = -1;
         T_IN_LEN = 0;
+        T_HIST_LEN = 0;
+        T_HIST_POS = -1;
         C_RESET();
         P_COLOR = 1; // black - the canvas starts white
         P_LAST = -1;
@@ -303,7 +319,53 @@ static mut T_BUF: [[u8; T_COLS]; T_ROWS] = [[0; T_COLS]; T_ROWS];
 static mut T_IN: [u8; T_COLS] = [0; T_COLS];
 static mut T_IN_LEN: usize = 0;
 static mut T_USED: usize = 0; // rows filled (scrolls when full)
+// command history (up/down arrow), newest at index 0
+static mut T_HIST: [[u8; T_COLS]; 8] = [[0; T_COLS]; 8];
+static mut T_HIST_LEN: usize = 0;
+static mut T_HIST_POS: i32 = -1; // -1 = editing live input
 static mut CATB: [u8; 2048] = [0; 2048]; // CAT file content staging
+
+/// store an executed command in the history (newest first)
+fn term_hist_push(cmd: &[u8]) {
+    unsafe {
+        if cmd.is_empty() {
+            return;
+        }
+        let n = cmd.len().min(T_COLS);
+        let last = T_HIST_LEN.min(T_HIST.len());
+        // drop an identical newest entry (no spam duplicates)
+        if last > 0 && T_HIST[0][..n] == cmd[..n] {
+            return;
+        }
+        // shift older entries back
+        let mut j = last;
+        while j > 1 {
+            T_HIST[j - 1] = T_HIST[j - 2];
+            j -= 1;
+        }
+        T_HIST[0] = [0; T_COLS];
+        T_HIST[0][..n].copy_from_slice(&cmd[..n]);
+        T_HIST_LEN = (last + 1).min(T_HIST.len());
+        T_HIST_POS = -1;
+    }
+}
+
+/// load history entry `pos` (0 = newest) into the input line
+fn term_hist_load(pos: i32) {
+    unsafe {
+        if pos < 0 || pos as usize >= T_HIST_LEN {
+            return;
+        }
+        let e = &T_HIST[pos as usize];
+        let mut n = T_COLS;
+        while n > 0 && e[n - 1] == 0 {
+            n -= 1;
+        }
+        T_IN = [0; T_COLS];
+        T_IN[..n].copy_from_slice(&e[..n]);
+        T_IN_LEN = n;
+    }
+}
 
 fn term_clear() {
     unsafe {
@@ -385,7 +447,7 @@ fn term_exec(cmd: &[u8]) {
     } else if eq("ECHO") {
         term_push(rest);
     } else if eq("VER") {
-        term_push_str("ASPECT OS 0.6.0 M9");
+        term_push_str("ASPECT OS 0.7.0 M10");
     } else if eq("UPTIME") {
         term_push_num("UP ", pit::ticks() / 1000, " SECONDS");
     } else if eq("MEM") {
@@ -844,12 +906,14 @@ fn terminal_key(code: u32) {
     unsafe {
         match code {
             256 => {
-                // Enter: execute and clear input
+                // Enter: execute, remember in history, clear input
                 let n = T_IN_LEN;
                 let mut cmd = [0u8; T_COLS];
                 cmd[..n].copy_from_slice(&T_IN[..n]);
                 T_IN_LEN = 0;
+                T_HIST_POS = -1;
                 term_exec(&cmd[..n]);
+                term_hist_push(&cmd[..n]);
             }
             257 => {
                 if T_IN_LEN > 0 {
@@ -859,6 +923,30 @@ fn terminal_key(code: u32) {
             }
             258 => {
                 T_IN_LEN = 0;
+                T_HIST_POS = -1;
+            }
+            259 => {
+                // up: one step back into the history
+                if T_HIST_LEN > 0 {
+                    let p = if T_HIST_POS < 0 { 0 } else { (T_HIST_POS + 1).min(T_HIST_LEN as i32 - 1) };
+                    if p != T_HIST_POS {
+                        T_HIST_POS = p;
+                        term_hist_load(p);
+                    }
+                }
+            }
+            260 => {
+                // down: one step forward (to the live input line)
+                if T_HIST_POS >= 0 {
+                    if T_HIST_POS == 0 {
+                        T_HIST_POS = -1;
+                        T_IN_LEN = 0;
+                        T_IN = [0; T_COLS];
+                    } else {
+                        T_HIST_POS -= 1;
+                        term_hist_load(T_HIST_POS);
+                    }
+                }
             }
             c if (32..126).contains(&c) => {
                 if T_IN_LEN < T_IN.len() {
@@ -1353,7 +1441,7 @@ fn about_draw(x: i32, y: i32, w: i32, h: i32) {
     gui::draw_line_t(x + 52, y + 20, x + 74, y + 78, 5, 0xFFF5A8E8);
     gui::draw_line_t(x + 38, y + 58, x + 66, y + 58, 5, 0xFFFFFFFF);
     gui::draw_text(x + 104, y + 28, "ASPECT OS", 5, 0xFFFFFFFF);
-    gui::draw_text(x + 104, y + 76, "VERSION 0.6 - AQUA", 2, 0xFF9A9AA6);
+    gui::draw_text(x + 104, y + 76, "VERSION 0.7 - USABILITY", 2, 0xFF9A9AA6);
     gui::fill_rect(x + 24, y + 120, w - 48, 1, 0xFF33333E);
     draw_multiline(x + 24, y + 136,
         "WINDOW COMPOSITOR WITH DRAG,\nFOCUS, TRAFFIC LIGHTS AND\nMENUBAR MENUS.\n\nFILES, TERMINAL, PAINT, NOTES,\nMUSIC, BROWSER, SETTINGS.\n\nOPEN/CLOSE + DOCK ANIMATIONS.\n100% OWN RUST CODE.", 2, 0xFFC0C0CA, w - 48);
